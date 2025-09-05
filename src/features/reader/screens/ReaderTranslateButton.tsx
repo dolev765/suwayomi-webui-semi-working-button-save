@@ -1,30 +1,11 @@
 import React, { useState, useEffect } from 'react';
+import '@/utils/streamingFetchShim';
+import { decodeTranslatorStreamToBlob } from '@/utils/translatorStream';
+import { useParams, useLocation } from 'react-router-dom';
 
 /**
- * 🎯 CRITICAL FIX IMPLEMENTED: Tachidesk Image URL Construction
- * 
- * ROOT CAUSE: The component was using window.location.origin (webUI port 3000) 
- * instead of the actual Tachidesk server URL (port 4567) for fetching images.
- * 
- * BEFORE: http://localhost:3000/api/v1/manga/2/chapter/1/page/1 ❌ (Returns HTML error page)
- * AFTER:  http://localhost:4567/api/v1/manga/2/chapter/1/page/1 ✅ (Returns actual image file)
- * 
- * This fix ensures images are fetched from the correct Tachidesk server,
- * eliminating the "cannot identify image file" errors from the manga translator.
- * 
- * 🚨 NEW ISSUE IDENTIFIED: 274-byte PNG files instead of translated images
- * ROOT CAUSE: Server is returning error responses or empty files instead of translated results
- * SOLUTION: Comprehensive debugging implemented to identify server configuration issues
- * 
- * 🎯 OFFICIAL IMAGE FORMAT CONVERTER IMPLEMENTED:
- * Uses HTML5 Canvas API for actual format conversion (WebP→PNG, JPEG→PNG)
- * Not just file extension changes - performs real image processing
- * Ensures PIL receives properly formatted PNG files for translation
- * 
- * 🔍 COMPREHENSIVE PAYLOAD DEBUGGING IMPLEMENTED:
- * Captures exact FormData structure being sent to API
- * Compares with server's expected format to identify mismatches
- * Provides detailed payload reports for debugging server issues
+ * Reader Translate Button (active)
+ * Uses live route + GraphQL to resolve current selection and translate.
  */
 import {
   Button, 
@@ -42,12 +23,19 @@ import {
   MenuItem, 
   Accordion,
   AccordionSummary,
-  AccordionDetails
+  AccordionDetails,
+  Switch,
+  FormControlLabel
 } from '@mui/material';
 import { ExpandMore } from '@mui/icons-material';
 import { requestManager } from '@/lib/requests/RequestManager.ts';
+import { Chapters } from '@/features/chapter/services/Chapters.ts';
 import { GET_CHAPTER_PAGES_FETCH } from '@/lib/graphql/mutations/ChapterMutation.ts';
 import gql from 'graphql-tag';
+import { GET_MANGA, GET_CHAPTER } from './ReaderTranslateButton/queries';
+import { useCurrentSelectionUrl as useCurrentSelectionUrlShared } from './readerTranslate/useCurrentSelectionUrl';
+import { useReaderStateChaptersContext } from '@/features/reader/contexts/state/ReaderStateChaptersContext.tsx';
+import { DownloadStateIndicator } from '@/base/components/downloads/DownloadStateIndicator.tsx';
 
 // Your GraphQL queries
 const GET_CHAPTER_INFO = gql`
@@ -85,34 +73,20 @@ const ENQUEUE_CHAPTER_DOWNLOAD = gql`
   }
 `;
 
-// GraphQL queries to get current selection URL (split to avoid null argument errors)
-const GET_MANGA_URL = gql`
-  query GetMangaUrl($mangaId: Int!) {
-    manga(id: $mangaId) {
-      id
-      title
-      url
-      realUrl
-    }
-  }
-`;
-
-const GET_CHAPTER_URL = gql`
-  query GetChapterUrl($chapterId: Int!) {
-    chapter(id: $chapterId) {
-      id
-      name
-      url
-      realUrl
-      manga {
+// Resolve internal chapter IDs for a manga; used to map route chapter number → internal ID
+const LIST_CHAPTERS = gql`
+  query ListChapters($mangaId: Int!) {
+    chapters(mangaId: $mangaId) {
+      nodes {
         id
-        title
-        url
-        realUrl
+        sourceOrder
       }
     }
   }
 `;
+
+// GraphQL queries to get current selection URL (split to avoid null argument errors)
+// Queries moved to ./ReaderTranslateButton/queries
 
 // Based on the full JSON schema documentation
   // ✅ FIXED: Nested configuration object matching manga-translator server's Pydantic model
@@ -213,6 +187,27 @@ const defaultConfig = {
   // Configuration presets for common use cases
   // ✅ CORRECT: Configuration presets with complete translator configurations
   const configPresets = {
+  
+  safe: {
+    name: "Safe Mode",
+    description: "No upscaler/inpainter; basic OCR; passthrough translator",
+    config: {
+      ...defaultConfig,
+      translator: {
+        translator: "original",
+        target_lang: "ENG",
+        enable_post_translation_check: false,
+        post_check_max_retry_attempts: 0,
+        post_check_repetition_threshold: 20,
+        post_check_target_lang_threshold: 0.5
+      },
+      // prefer widely available OCR size
+      ocr: { ...defaultConfig.ocr, ocr: "48px", use_mocr_merge: false },
+      // disable heavy modules
+      upscaler: { upscaler: "none", revert_upscaling: false, upscale_ratio: null },
+      inpainter: { inpainter: "none", inpainting_size: 2048, inpainting_precision: "fp32" }
+    }
+  },
   fast: {
     name: "Fast Translation",
     description: "Quick translation with basic quality",
@@ -271,13 +266,54 @@ interface ReaderTranslateButtonProps {
 }
 
 // Custom hook to fetch current selection URL from GraphQL
+// Support Tachidesk routes like:
+// - /manga/:mangaId
+// - /manga/:mangaId/chapter/:chapterId
+// - /manga/:sourceId/:mangaId
+// - /manga/:sourceId/:mangaId/chapter/:chapterId
+const parseIdsFromPath = (pathname: string): { mangaId?: number; chapterId?: number } => {
+  // /manga/:sourceId/:mangaId/chapter/:chapterId
+  let m = pathname.match(/^\/manga\/(\d+)\/(\d+)\/chapter\/(\d+)/);
+  if (m) return { mangaId: Number(m[2]), chapterId: Number(m[3]) };
+  // /manga/:mangaId/chapter/:chapterId
+  m = pathname.match(/^\/manga\/(\d+)\/chapter\/(\d+)/);
+  if (m) return { mangaId: Number(m[1]), chapterId: Number(m[2]) };
+  // /manga/:sourceId/:mangaId
+  m = pathname.match(/^\/manga\/(\d+)\/(\d+)/);
+  if (m) return { mangaId: Number(m[2]) };
+  // /manga/:mangaId
+  m = pathname.match(/^\/manga\/(\d+)/);
+  if (m) return { mangaId: Number(m[1]) };
+  return {};
+};
+
 const useCurrentSelectionUrl = (mangaId?: number, chapterId?: number) => {
+  const params = useParams<{ mangaId?: string; chapterId?: string }>();
+  const location = useLocation();
+
+  // Prefer explicit props; fall back to route params; finally parse pathname
+  const { mangaId: mangaIdFromParams, chapterId: chapterIdFromParams } = useParams<{ mangaId?: string; chapterId?: string }>();
+  const effectiveMangaId =
+    typeof mangaId === 'number'
+      ? mangaId
+      : mangaIdFromParams
+      ? Number(mangaIdFromParams)
+      : undefined;
+  const effectiveChapterId =
+    typeof chapterId === 'number'
+      ? chapterId
+      : chapterIdFromParams
+      ? Number(chapterIdFromParams)
+      : undefined;
+
+  const routeUrl = `${window.location.origin}${location.pathname}${location.search}${location.hash}`;
+
   const [currentUrl, setCurrentUrl] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!mangaId) {
+    if (!effectiveMangaId) {
       setCurrentUrl('');
       setError(null);
       return;
@@ -288,32 +324,35 @@ const useCurrentSelectionUrl = (mangaId?: number, chapterId?: number) => {
       setError(null);
 
       try {
-        if (chapterId) {
+        // Start with the live route URL; only override if needed
+        setCurrentUrl(routeUrl);
+
+        if (effectiveChapterId) {
           const result = await requestManager.graphQLClient.client.query({
-            query: GET_CHAPTER_URL,
-            variables: { chapterId },
+            query: GET_CHAPTER,
+            variables: { chapterId: effectiveChapterId },
             fetchPolicy: 'network-only'
           });
 
           const chapterUrl = result.data?.chapter?.url || result.data?.chapter?.realUrl;
           const mangaUrl = result.data?.chapter?.manga?.url || result.data?.chapter?.manga?.realUrl;
-          const finalUrl = chapterUrl || mangaUrl || `${window.location.origin}/manga/${mangaId}/chapter/${chapterId}`;
+          const finalUrl = chapterUrl || mangaUrl || `${window.location.origin}/manga/${effectiveMangaId}/chapter/${effectiveChapterId}`;
           setCurrentUrl(finalUrl);
         } else {
           const result = await requestManager.graphQLClient.client.query({
-            query: GET_MANGA_URL,
-            variables: { mangaId },
+            query: GET_MANGA,
+            variables: { mangaId: effectiveMangaId },
             fetchPolicy: 'network-only'
           });
 
           const mangaUrl = result.data?.manga?.url || result.data?.manga?.realUrl;
-          const finalUrl = mangaUrl || `${window.location.origin}/manga/${mangaId}`;
+          const finalUrl = mangaUrl || `${window.location.origin}/manga/${effectiveMangaId}`;
           setCurrentUrl(finalUrl);
         }
       } catch (err) {
         console.warn('GraphQL failed for current selection URL, using fallback:', err);
-        // Do not surface a UI warning; fall back to route-based URL
-        const fallbackUrl = `${window.location.origin}/manga/${mangaId}${chapterId ? `/chapter/${chapterId}` : ''}`;
+        // Silent fallback to route-based URL
+        const fallbackUrl = `${window.location.origin}/manga/${effectiveMangaId}${effectiveChapterId ? `/chapter/${effectiveChapterId}` : ''}`;
         setCurrentUrl(fallbackUrl);
         setError(null);
       } finally {
@@ -322,7 +361,7 @@ const useCurrentSelectionUrl = (mangaId?: number, chapterId?: number) => {
     };
 
     fetchCurrentUrl();
-  }, [mangaId, chapterId]);
+  }, [effectiveMangaId, effectiveChapterId, routeUrl]);
 
   return { currentUrl, isLoading, error };
 };
@@ -335,12 +374,24 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<string>('');
+  const [resolvedChapterId, setResolvedChapterId] = useState<number | null>(null);
+
+  // Subscribe to download updates and keep download status cache warm
+  requestManager.useGetDownloadStatus({ nextFetchPolicy: 'standby' });
+  requestManager.useDownloadSubscription();
   
   // --- NEW: State for the full configuration object ---
   const [config, setConfig] = useState(defaultConfig);
+  const [enableNonStreamFallback, setEnableNonStreamFallback] = useState(false);
+  // Prefer live reader context over route props
+  const { currentChapter } = useReaderStateChaptersContext();
+  const effectiveMangaId = currentChapter?.mangaId ?? mangaId;
+  const effectiveChapterSourceOrder = currentChapter?.sourceOrder ?? chapterId;
+  
+  // Use GraphQL-based current selection URL
   
   // 🎯 FIXED: Use GraphQL-based current selection URL
-  const { currentUrl, isLoading: isLoadingUrl, error: urlError } = useCurrentSelectionUrl(mangaId, chapterId);
+  const { currentUrl, isLoading: isLoadingUrl, error: urlError } = useCurrentSelectionUrlShared(effectiveMangaId, effectiveChapterSourceOrder);
   
   // Optional persistence: Save current URL to localStorage when it changes
   useEffect(() => {
@@ -406,47 +457,115 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
     event.target.value = '';
   };
 
+  // Ensure a valid base URL and guard against accidentally pasted JSON payloads
+  const sanitizeApiBase = (input: string): string => {
+    const raw = (input || '').trim();
+    if (!raw) throw new Error('API URL is empty');
+
+    // If a JSON payload was accidentally pasted, try to recover or fail fast
+    if (raw.startsWith('{')) {
+      try {
+        const obj = JSON.parse(raw);
+        if (typeof obj.requestUrl === 'string') {
+          const u = new URL(obj.requestUrl);
+          return `${u.protocol}//${u.host}`;
+        }
+      } catch {
+        /* ignore and fall through to error */
+      }
+      throw new Error('Invalid API URL (looks like JSON). Enter a base like http://host:port');
+    }
+
+    let urlString = raw.replace(/^"+|"+$/g, '').trim();
+    if (!/^https?:\/\//i.test(urlString)) {
+      // Default to http if scheme missing
+      urlString = `http://${urlString}`;
+    }
+    let u: URL;
+    try {
+      u = new URL(urlString);
+    } catch {
+      throw new Error('Invalid API URL format');
+    }
+    const base = `${u.protocol}//${u.host}`;
+    return base;
+  };
+
+  // Resolve internal chapter id from route number if needed
+  const resolveInternalChapterId = async (): Promise<number> => {
+    if (!effectiveMangaId || !effectiveChapterSourceOrder) {
+      throw new Error('Missing mangaId or chapterId to resolve internal chapter id');
+    }
+
+    // Best source: the reader context's current chapter (already internal id)
+    if (currentChapter?.id && currentChapter.mangaId === effectiveMangaId) {
+      return currentChapter.id;
+    }
+
+    // Resolve by listing chapters and matching sourceOrder for this manga
+    const list = await requestManager.graphQLClient.client.query({
+      query: LIST_CHAPTERS,
+      variables: { mangaId: effectiveMangaId },
+      fetchPolicy: 'network-only'
+    });
+    const nodes = list?.data?.chapters?.nodes || [];
+    const match = nodes.find((c: any) => c?.sourceOrder === effectiveChapterSourceOrder);
+    if (!match?.id) {
+      throw new Error(`Unable to resolve internal chapter id for route chapter ${effectiveChapterSourceOrder}`);
+    }
+    return match.id as number;
+  };
+
   const downloadChapter = async (): Promise<string[]> => {
     try {
+      // Always resolve internal id before any chapter operations
+      const internalChapterId = await resolveInternalChapterId();
+      setResolvedChapterId(internalChapterId);
+
       // Check if chapter is already downloaded
       const chapterInfo = await requestManager.graphQLClient.client.query({
         query: GET_CHAPTER_INFO,
-        variables: { chapterId }
+        variables: { chapterId: internalChapterId }
       });
 
       const isDownloaded = chapterInfo.data.chapter?.isDownloaded;
-      console.log(`Chapter ${chapterId} download status:`, isDownloaded);
+      console.log(`Chapter ${internalChapterId} (sourceOrder ${String(effectiveChapterSourceOrder)}) download status:`, isDownloaded);
 
       if (!isDownloaded) {
         // Enqueue download
         setDownloadProgress('Chapter not downloaded. Starting download...');
-                 const downloadResult = await requestManager.graphQLClient.client.mutate({
+        const downloadResult = await requestManager.graphQLClient.client.mutate({
            mutation: ENQUEUE_CHAPTER_DOWNLOAD,
            variables: {
-             input: { id: chapterId }
+             input: { id: internalChapterId }
            }
          });
 
         console.log('Download enqueued:', downloadResult);
 
-        // Poll for download completion
+        // Wait for download completion using live subscription-driven cache updates
         let attempts = 0;
-        const maxAttempts = 30; // 30 seconds max
+        const maxAttempts = 120; // up to 2 minutes
         while (attempts < maxAttempts) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          attempts++;
-
-          const statusCheck = await requestManager.graphQLClient.client.query({
-            query: GET_CHAPTER_INFO,
-            variables: { chapterId }
-          });
-
-          if (statusCheck.data.chapter?.isDownloaded) {
-            setDownloadProgress('Chapter download completed!');
-            break;
+          const dl = Chapters.getDownloadStatusFromCache(internalChapterId);
+          if (dl) {
+            const pct = Math.round((dl as any).progress * 100) || 0;
+            const state = (dl as any).state || 'DOWNLOADING';
+            setDownloadProgress(`Downloading chapter... ${pct}% (${String(state).toLowerCase()})`);
+          } else {
+            // Entry removed from queue: verify downloaded
+            const statusCheck = await requestManager.graphQLClient.client.query({
+              query: GET_CHAPTER_INFO,
+              variables: { chapterId: internalChapterId },
+              fetchPolicy: 'network-only',
+            });
+            if (statusCheck.data.chapter?.isDownloaded) {
+              setDownloadProgress('Chapter download completed!');
+              break;
+            }
           }
-
-          setDownloadProgress(`Downloading chapter... (${attempts}s)`);
+          await new Promise((r) => setTimeout(r, 1000));
+          attempts++;
         }
 
         if (attempts >= maxAttempts) {
@@ -459,7 +578,7 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
       const pagesResult = await requestManager.graphQLClient.client.mutate({
         mutation: GET_CHAPTER_PAGES_FETCH,
         variables: {
-          input: { chapterId }
+          input: { chapterId: internalChapterId }
         }
       });
 
@@ -873,7 +992,7 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
   // Simple server connectivity test with timeout (no health endpoint exists on manga translator server)
   const testServerConnectivity = async (apiUrl: string): Promise<boolean> => {
     try {
-      const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
+      const cleanUrl = sanitizeApiBase(apiUrl);
       
       // Create a timeout promise to prevent infinite hangs
       const timeoutPromise = new Promise<Response>((_, reject) => {
@@ -925,7 +1044,7 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
       return;
     }
 
-    if (!mangaId || !chapterId) {
+    if (!effectiveMangaId || !effectiveChapterSourceOrder) {
       setError('No manga or chapter selected. Please navigate to a manga chapter first.');
       setLoading(false);
       return;
@@ -1128,49 +1247,136 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
           }
           
           // 🔍 COMPREHENSIVE DEBUGGING: Capture the exact payload being sent
-          // Now cleanApiUrl is properly defined
-          debugFormDataPayload(formData, imageNumber, cleanApiUrl);
+          // Validate/normalize API base first to avoid malformed URLs
+          let baseUrl: string;
+          try {
+            baseUrl = sanitizeApiBase(apiUrl);
+          } catch (e) {
+            throw new Error((e as Error).message);
+          }
+
+          // Log payload using the normalized base URL (does not modify it)
+          void debugFormDataPayload(formData, imageNumber, baseUrl);
 
           const headers: HeadersInit = {};
-      if (apiKey) {
-        headers['X-API-Key'] = apiKey;
-      }
-
-          // 🚨 SERVER CONFIGURATION DEBUGGING
-          console.log(`🚨 SERVER REQUEST DEBUG - Image ${imageNumber}:`, {
-            endpoint: `${cleanApiUrl}/translate/with-form/image/stream/web`,
-            method: 'POST',
-            headers: headers,
-            imageFileSize: imageFile.size,
-            imageFileType: imageFile.type,
-            configSize: JSON.stringify(config).length
-          });
-
-          const response = await fetch(`${cleanApiUrl}/translate/with-form/image/stream/web`, {
-            method: 'POST',
-            headers,
-            body: formData
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`HTTP ${response.status}: ${errorText}`);
+          if (apiKey) {
+            headers['X-API-Key'] = apiKey;
           }
-          
-          // 🚨 IMMEDIATE DEBUGGING: Check what the server is actually returning
-          console.log(`🚨 SERVER RESPONSE DEBUG - Image ${imageNumber}:`, {
-            status: response.status,
-            statusText: response.statusText,
-            contentType: response.headers.get('content-type'),
-            contentLength: response.headers.get('content-length'),
-            allHeaders: Object.fromEntries(response.headers.entries())
-          });
 
-                    // Handle the response (streaming or direct)
-          const contentType = response.headers.get('content-type');
-          
-          // 🚨 CRITICAL DEBUGGING: Check the actual response content
-          const responseBlob = await response.blob();
+          // Helper: post to translation endpoint with streaming fallback handling
+          const postTranslate = async (): Promise<Blob> => {
+            const STREAM_WEB = `${baseUrl}/translate/with-form/image/stream/web`;
+            const STREAM_FULL = `${baseUrl}/translate/with-form/image/stream`;
+            const IMAGE_FULL = `${baseUrl}/translate/with-form/image`;
+
+            // Follow server-recommended fallback: stream/web → stream → image
+            const endpoints = [STREAM_WEB, STREAM_FULL, ...(enableNonStreamFallback ? [IMAGE_FULL] : [])];
+
+            const buildFormData = () => {
+              const fd = new FormData();
+              fd.append('image', imageFile);
+              fd.append('config', JSON.stringify(config));
+              return fd;
+            };
+
+            // Use native fetch for stream endpoints to bypass shim when we want live progress
+            const rawFetch: typeof fetch = (globalThis as any).__nativeFetch__ || fetch.bind(globalThis);
+
+            let lastErr: any = null;
+            for (const endpoint of endpoints) {
+              try {
+                console.log(`🚨 SERVER REQUEST DEBUG - Image ${imageNumber}:`, {
+                  endpoint,
+                  method: 'POST',
+                  headers: headers,
+                  imageFileSize: imageFile.size,
+                  imageFileType: imageFile.type,
+                  configSize: JSON.stringify(config).length
+                });
+
+                const isStream = /\/translate\/with-form\/image\/stream(\/web)?$/i.test(endpoint);
+
+                if (isStream) {
+                  const resp = await rawFetch(endpoint, {
+                    method: 'POST',
+                    headers: { ...headers, Accept: 'application/octet-stream' },
+                    body: buildFormData(),
+                    redirect: 'follow',
+                    cache: 'no-store',
+                  });
+
+                  if (!resp.ok) {
+                    let detail = '';
+                    try {
+                      const j = await resp.clone().json();
+                      detail = (j as any)?.detail ?? JSON.stringify(j);
+                    } catch {
+                      detail = await resp.text().catch(() => '');
+                    }
+                    throw new Error(`HTTP ${resp.status}: ${detail || resp.statusText}`);
+                  }
+
+                  try {
+                    const blob = await decodeTranslatorStreamToBlob(resp, {
+                      onProgress: (msg) => setDownloadProgress(`Streaming: ${msg}`),
+                      onQueue: (msg) => setDownloadProgress(`Queue: ${msg}`),
+                    });
+
+                    // If web stream yields placeholder, escalate to full stream
+                    if (endpoint === STREAM_WEB && blob.size < 1000) {
+                      console.warn('Placeholder PNG detected on stream/web; falling back to full stream...');
+                      lastErr = new Error('Placeholder from stream/web');
+                      continue;
+                    }
+                    return blob;
+                  } catch (e: any) {
+                    lastErr = e;
+                    const m = String(e?.message || '');
+                    if (m.includes('Translation failed')) {
+                      console.warn(`Translate error at ${endpoint}${isStream ? ' (stream)' : ''}, trying next fallback...`);
+                      continue;
+                    }
+                    console.warn(`Stream decode failed at ${endpoint}:`, e);
+                    continue;
+                  }
+                } else {
+                  // Non-stream endpoint: return final image directly
+                  const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { ...headers, Accept: 'image/*' },
+                    body: buildFormData(),
+                    redirect: 'follow',
+                    cache: 'no-store',
+                  });
+                  if (!resp.ok) {
+                    let detail = '';
+                    try {
+                      const j = await resp.clone().json();
+                      detail = (j as any)?.detail ?? JSON.stringify(j);
+                    } catch {
+                      detail = await resp.text().catch(() => '');
+                    }
+                    throw new Error(`HTTP ${resp.status}: ${detail || resp.statusText}`);
+                  }
+                  return await resp.blob();
+                }
+              } catch (e: any) {
+                lastErr = e;
+                const msg = String(e?.message || '');
+                // On explicit translate failure from shim, move to next endpoint
+                if (msg.includes('Translation failed')) {
+                  console.warn(`Type-2 stream error at ${endpoint}, trying next fallback...`);
+                  continue;
+                }
+                console.warn(`Translate request failed at endpoint ${endpoint}:`, e);
+              }
+            }
+            throw lastErr || new Error('All translate endpoints failed');
+          };
+
+          const responseBlob = await postTranslate();
+
+          const contentType = responseBlob.type || 'application/octet-stream';
           console.log(`🚨 RESPONSE CONTENT DEBUG - Image ${imageNumber}:`, {
             blobSize: responseBlob.size,
             blobType: responseBlob.type,
@@ -1263,7 +1469,7 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
           {/* Debug: Show props being received */}
           <Box sx={{ mb: 2, p: 1, bgcolor: 'grey.100', borderRadius: 1, fontSize: '0.8rem' }}>
             <Typography variant="caption" color="text.secondary">
-              <strong>Debug Info:</strong> Props received - mangaId: {mangaId}, chapterId: {chapterId}
+              <strong>Debug Info:</strong> Effective - mangaId: {String(effectiveMangaId)}, chapter (sourceOrder): {String(effectiveChapterSourceOrder)}
             </Typography>
           </Box>
           
@@ -1279,8 +1485,10 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
               {currentUrl ? (
                 <>
                   <Typography><strong>URL:</strong> {currentUrl}</Typography>
-                  <Typography><strong>Manga ID:</strong> {mangaId}</Typography>
-                  {chapterId && <Typography><strong>Chapter ID:</strong> {chapterId}</Typography>}
+                  <Typography><strong>Manga ID:</strong> {String(effectiveMangaId)}</Typography>
+                  {effectiveChapterSourceOrder && (
+                    <Typography><strong>Chapter (sourceOrder):</strong> {String(effectiveChapterSourceOrder)}</Typography>
+                  )}
                   <Typography variant="caption" color="text.secondary">
                     This will translate the currently selected chapter
                   </Typography>
@@ -1461,6 +1669,15 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
                     Reset to Default
                   </Button>
                 </Box>
+                <Box sx={{ mt: 2 }}>
+                  <FormControlLabel
+                    control={<Switch checked={enableNonStreamFallback} onChange={(e) => setEnableNonStreamFallback(e.target.checked)} />}
+                    label="Enable non-stream fallback (/translate/with-form/image)"
+                  />
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    Leave off for stability. Turn on only if your server doesn’t support stream endpoints.
+                  </Typography>
+                </Box>
               </Box>
             </AccordionDetails>
           </Accordion>
@@ -1476,6 +1693,11 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
               <Typography variant="body2" color="info.dark">
                 {downloadProgress}
               </Typography>
+              {resolvedChapterId !== null && (
+                <Box sx={{ mt: 1 }}>
+                  <DownloadStateIndicator chapterId={resolvedChapterId} />
+                </Box>
+              )}
               
               {/* Show progress bar for batch operations */}
               {downloadProgress.includes('Processing image') && (
@@ -1523,3 +1745,4 @@ const ReaderTranslateButton: React.FC<ReaderTranslateButtonProps> = ({ mangaId, 
 };
 
 export default ReaderTranslateButton;
+

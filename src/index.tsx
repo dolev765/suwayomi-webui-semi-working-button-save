@@ -34,3 +34,4 @@ root.render(
         <App />
     </StrictMode>,
 );
+import './utils/streamingFetchShim';
