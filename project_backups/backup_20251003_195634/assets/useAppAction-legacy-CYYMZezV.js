@@ -1,0 +1,1 @@
+System.register(["./index-legacy-DbvsbuFI.js"],function(t,n){"use strict";var e,u;return{setters:[function(t){e=t.E,u=t.b}],execute:function(){t("u",function(t){var n=arguments.length>1&&void 0!==arguments[1]?arguments[1]:[],r=e().setAction;u.useEffect(function(){return r(t),function(){return r(null)}},n)})}}});

@@ -1,0 +1,824 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import FilterListIcon from '@mui/icons-material/FilterList';
+import Stack from '@mui/material/Stack';
+import Button from '@mui/material/Button';
+import { ApolloError } from '@apollo/client';
+import { BaseMangaGrid } from '@/features/manga/components/BaseMangaGrid.tsx';
+import { MangaCardProps } from '@/features/manga/Manga.types.ts';
+import { requestManager } from '@/lib/requests/RequestManager.ts';
+import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle.ts';
+import { LoadingPlaceholder } from '@/base/components/feedback/LoadingPlaceholder.tsx';
+import { EmptyViewAbsoluteCentered } from '@/base/components/feedback/EmptyViewAbsoluteCentered.tsx';
+import { defaultPromiseErrorHandler } from '@/lib/DefaultPromiseErrorHandler.ts';
+import { getErrorMessage } from '@/lib/HelperFunctions.ts';
+import {
+    FetchSourceMangaType,
+    GetSourceBrowseQuery,
+    GetSourceBrowseQueryVariables,
+    SourceListFieldsFragment,
+    TriState,
+} from '@/lib/graphql/generated/graphql.ts';
+import { GET_SOURCE_BROWSE } from '@/lib/graphql/queries/SourceQuery.ts';
+import { useMetadataServerSettings } from '@/features/settings/services/ServerSettingsMetadata.ts';
+import { ModeOneFilterPanel } from '@/features/mode-one/components/ModeOneFilterPanel.tsx';
+import {
+    AggregatedFilter,
+    ModeOneFilterPayload,
+    ModeOneFilterPayloads,
+    ModeOneFilterSelection,
+    ModeOneSourceKey,
+    MODE_ONE_SOURCE_LABELS,
+    SourceFilterDescriptor,
+} from '@/features/mode-one/ModeOne.types.ts';
+import { SourceFilters, IPos } from '@/features/source/Source.types.ts';
+import { useLocalStorage } from '@/base/hooks/useStorage.tsx';
+
+const BATCH_SIZE_PER_SOURCE = 4;
+
+const SOURCE_CONFIG: Array<{ key: ModeOneSourceKey; matchers: string[] }> = [
+    { key: 'hentai2read', matchers: ['hentai2read'] },
+    { key: 'hitomi', matchers: ['hitomi'] },
+    { key: 'ehentai', matchers: ['ehentai', 'e-hentai', 'eh'] },
+    { key: 'hentaifox', matchers: ['hentaifox', 'hentai-fox', 'hentai fox'] },
+];
+
+type ModeOneFeedState = {
+    mangas: MangaCardProps['manga'][];
+    isLoading: boolean;
+    hasNextPage: boolean;
+    error: ApolloError | undefined;
+    loadMore: () => void;
+    filteredOutAllItemsOfFetchedPage: boolean;
+    warnings: string[];
+};
+
+const normalize = (value?: string | null) => value?.toLowerCase().replace(/[^a-z0-9]/g, '') ?? '';
+
+const matchesSource = (source: SourceListFieldsFragment, patterns: string[]): boolean => {
+    const candidates = [
+        source.name,
+        source.displayName,
+        source.extension?.pkgName ?? undefined,
+        ...source.meta.map((meta) => meta.value),
+    ].map(normalize);
+
+    return patterns.some((pattern) => {
+        const normalizedPattern = normalize(pattern);
+        return normalizedPattern.length > 0 && candidates.some((candidate) => candidate.includes(normalizedPattern));
+    });
+};
+
+const getUniqueMangas = (mangas: MangaCardProps['manga'][]): MangaCardProps['manga'][] => {
+    const seen = new Set<number>();
+    const unique: MangaCardProps['manga'][] = [];
+
+    mangas.forEach((manga) => {
+        if (seen.has(manga.id)) {
+            return;
+        }
+        seen.add(manga.id);
+        unique.push(manga);
+    });
+
+    return unique;
+};
+
+const normalizeOptionLabel = (value: string): string => value.toLowerCase().trim().replace(/\s+/g, ' ');
+
+const NORMALIZED_PREFIX_REGEX =
+    /^(?:male|female|men|women|boys?|girls?|character|characters|tag|tags|category|categories)\s*[:\-_]?\s*/i;
+
+const createNormalizedKeys = (value: string): string[] => {
+    const normalized = normalizeOptionLabel(value);
+    if (!normalized) {
+        return [];
+    }
+    const keys = new Set<string>();
+    keys.add(normalized);
+    keys.add(normalized.replace(/\s+/g, ''));
+
+    const withoutPrefix = normalizeOptionLabel(normalized.replace(NORMALIZED_PREFIX_REGEX, ''));
+    if (withoutPrefix && withoutPrefix !== normalized) {
+        keys.add(withoutPrefix);
+        keys.add(withoutPrefix.replace(/\s+/g, ''));
+    }
+
+    const noColon = normalizeOptionLabel(normalized.replace(/[:]/g, ' '));
+    if (noColon && noColon !== normalized) {
+        keys.add(noColon);
+        keys.add(noColon.replace(/\s+/g, ''));
+    }
+
+    return [...keys];
+};
+
+const flattenSourceFilters = (filters: SourceFilters[], group?: number): SourceFilterDescriptor[] => {
+    const descriptors: SourceFilterDescriptor[] = [];
+
+    filters.forEach((filter, index) => {
+        const label = filter.name?.trim();
+        if (!label) {
+            return;
+        }
+        switch (filter.type) {
+            case 'GroupFilter':
+                descriptors.push(...flattenSourceFilters(filter.filters ?? [], index));
+                break;
+            case 'SelectFilter': {
+                const values = filter.values ?? [];
+                const valueIndex = values.reduce<Record<string, number>>((accumulator, value, valueIndexPosition) => {
+                    accumulator[value] = valueIndexPosition;
+                    return accumulator;
+                }, {});
+                descriptors.push({
+                    type: 'select',
+                    label,
+                    position: index,
+                    group,
+                    values,
+                    valueIndex,
+                });
+                break;
+            }
+            case 'CheckBoxFilter':
+                descriptors.push({
+                    type: 'checkbox',
+                    label,
+                    position: index,
+                    group,
+                });
+                break;
+            case 'TriStateFilter':
+                descriptors.push({
+                    type: 'tri',
+                    label,
+                    position: index,
+                    group,
+                });
+                break;
+            case 'TextFilter':
+                descriptors.push({
+                    type: 'text',
+                    label,
+                    position: index,
+                    group,
+                });
+                break;
+            default:
+                break;
+        }
+    });
+
+    return descriptors;
+};
+
+const buildAggregatedFilters = (
+    descriptorsBySource: Partial<Record<ModeOneSourceKey, SourceFilterDescriptor[]>>,
+): AggregatedFilter[] => {
+    const aggregated = new Map<string, AggregatedFilter>();
+
+    (Object.entries(descriptorsBySource) as [ModeOneSourceKey, SourceFilterDescriptor[] | undefined][]).forEach(
+        ([sourceKey, descriptors]) => {
+            if (!descriptors?.length) {
+                return;
+            }
+
+            descriptors.forEach((descriptor) => {
+                const key = `${descriptor.type}:${descriptor.label.toLowerCase()}`;
+                const existing = aggregated.get(key);
+
+                const addOption = (entry: AggregatedFilter, value: string) => {
+                    if (!value) {
+                        return;
+                    }
+                    const normalizedKeys = createNormalizedKeys(value);
+                    const existingOption = entry.options?.find((option) =>
+                        option.normalizedKeys.some((key) => normalizedKeys.includes(key)),
+                    );
+
+                    if (existingOption) {
+                        option.sources.forEach((source) => {
+                            if (!existingOption.sources.includes(source)) {
+                                existingOption.sources.push(source);
+                            }
+                        });
+                        normalizedKeys.forEach((key) => {
+                            if (!existingOption.normalizedKeys.includes(key)) {
+                                existingOption.normalizedKeys.push(key);
+                            }
+                        });
+                        if (value.length < existingOption.label.length) {
+                            existingOption.label = value;
+                        }
+                    } else {
+                        entry.options?.push({
+                            key: value,
+                            label: value,
+                            normalizedKeys,
+                            sources: [sourceKey],
+                        });
+                    }
+                };
+
+                if (!existing) {
+                    const newEntry: AggregatedFilter = {
+                        key,
+                        label: descriptor.label,
+                        type: descriptor.type,
+                        perSource: { [sourceKey]: descriptor },
+                        ...(descriptor.type === 'select' ? { options: [] } : {}),
+                    } as AggregatedFilter;
+
+                    if (descriptor.type === 'select') {
+                        descriptor.values.forEach((value) => addOption(newEntry, value));
+                    }
+
+                    aggregated.set(key, newEntry);
+                    return;
+                }
+
+                existing.perSource[sourceKey] = descriptor;
+
+                if (descriptor.type === 'select' && existing.options) {
+                    descriptor.values.forEach((value) => addOption(existing, value));
+                }
+            });
+        },
+    );
+
+    return [...aggregated.values()];
+};
+
+const buildFilterPayloads = (
+    filters: AggregatedFilter[],
+    selection: ModeOneFilterSelection,
+    strictOnly: boolean,
+    activeSourceKeys: ModeOneSourceKey[],
+    translate: (key: string, options?: Record<string, unknown>) => string,
+): ModeOneFilterPayloads => {
+    const createPayload = (): ModeOneFilterPayload => ({ filters: [], warnings: [], shouldInclude: true });
+    const payloads: ModeOneFilterPayloads = {
+        hentai2read: createPayload(),
+        hitomi: createPayload(),
+        ehentai: createPayload(),
+        hentaifox: createPayload(),
+    };
+    const warningSets: Record<ModeOneSourceKey, Set<string>> = {
+        hentai2read: new Set(),
+        hitomi: new Set(),
+        ehentai: new Set(),
+        hentaifox: new Set(),
+    };
+
+    const addWarning = (sourceKey: ModeOneSourceKey, message: string) => {
+        warningSets[sourceKey].add(message);
+    };
+
+    filters.forEach((filter) => {
+        const selectionValue = selection[filter.key];
+        if (!selectionValue) {
+            return;
+        }
+
+        activeSourceKeys.forEach((sourceKey) => {
+            const descriptor = filter.perSource[sourceKey];
+            if (!descriptor) {
+                addWarning(
+                    sourceKey,
+                    translate('modeOne.warning.missingFilter', {
+                        source: MODE_ONE_SOURCE_LABELS[sourceKey],
+                        filter: filter.label,
+                    }),
+                );
+                if (strictOnly) {
+                    payloads[sourceKey].shouldInclude = false;
+                }
+                return;
+            }
+
+            switch (filter.type) {
+                case 'select': {
+                    if (selectionValue.type !== 'select' || !selectionValue.value) {
+                        return;
+                    }
+                    const valueIndex = descriptor.valueIndex[selectionValue.value];
+                    if (valueIndex === undefined) {
+                        addWarning(
+                            sourceKey,
+                            translate('modeOne.warning.missingFilterValue', {
+                                source: MODE_ONE_SOURCE_LABELS[sourceKey],
+                                filter: filter.label,
+                                value: selectionValue.value,
+                            }),
+                        );
+                        if (strictOnly) {
+                            payloads[sourceKey].shouldInclude = false;
+                        }
+                        return;
+                    }
+                    payloads[sourceKey].filters.push({
+                        type: 'selectState',
+                        position: descriptor.position,
+                        group: descriptor.group,
+                        state: valueIndex,
+                    });
+                    break;
+                }
+                case 'checkbox': {
+                    if (selectionValue.type !== 'checkbox' || !selectionValue.value) {
+                        return;
+                    }
+                    payloads[sourceKey].filters.push({
+                        type: 'checkBoxState',
+                        position: descriptor.position,
+                        group: descriptor.group,
+                        state: true,
+                    });
+                    break;
+                }
+                case 'tri': {
+                    if (selectionValue.type !== 'tri') {
+                        return;
+                    }
+                    payloads[sourceKey].filters.push({
+                        type: 'triState',
+                        position: descriptor.position,
+                        group: descriptor.group,
+                        state: selectionValue.value as TriState,
+                    });
+                    break;
+                }
+                case 'text': {
+                    if (selectionValue.type !== 'text' || !selectionValue.value) {
+                        return;
+                    }
+                    payloads[sourceKey].filters.push({
+                        type: 'textState',
+                        position: descriptor.position,
+                        group: descriptor.group,
+                        state: selectionValue.value,
+                    });
+                    break;
+                }
+                default:
+                    break;
+            }
+        });
+    });
+
+    (Object.keys(payloads) as ModeOneSourceKey[]).forEach((sourceKey) => {
+        payloads[sourceKey].warnings = [...warningSets[sourceKey]];
+        if (!activeSourceKeys.includes(sourceKey)) {
+            payloads[sourceKey].shouldInclude = false;
+        }
+    });
+
+    return payloads;
+};
+
+const convertToFilterChangeInput = (filters: IPos[]) =>
+    filters.map((filter) => {
+        const { position, state, group } = filter;
+        if (group !== undefined) {
+            return {
+                position: group,
+                groupChange: {
+                    position,
+                    [filter.type]: state,
+                },
+            };
+        }
+
+        return {
+            position,
+            [filter.type]: state,
+        };
+    });
+
+const useSourceFeed = (
+    sourceId: string | undefined,
+    hideLibraryEntries: boolean,
+    label: string,
+    filterPayload: ModeOneFilterPayload,
+    query: string,
+): ModeOneFeedState => {
+    const trimmedQuery = query.trim();
+    const hasQuery = trimmedQuery.length > 0;
+    const filterChanges = useMemo(() => convertToFilterChangeInput(filterPayload.filters), [filterPayload.filters]);
+    const shouldSkip = !sourceId || !filterPayload.shouldInclude;
+    const initialPages = shouldSkip ? 0 : 1;
+
+    const [fetchPage, pages] = requestManager.useGetSourceMangas(
+        {
+            source: sourceId ?? '',
+            type: hasQuery || filterChanges.length ? FetchSourceMangaType.Search : FetchSourceMangaType.Popular,
+            query: hasQuery ? trimmedQuery : undefined,
+            filters: filterChanges.length ? filterChanges : undefined,
+            page: 1,
+        },
+        initialPages,
+        { skipRequest: shouldSkip },
+    );
+
+    const lastPage = pages[pages.length - 1];
+
+    const { mangas, filteredOutAllItemsOfFetchedPage } = useMemo(() => {
+        if (shouldSkip) {
+            return { mangas: [] as MangaCardProps['manga'][], filteredOutAllItemsOfFetchedPage: false };
+        }
+
+        let collected: MangaCardProps['manga'][] = [];
+        let filteredOutAllItems = false;
+
+        pages.forEach((page, index) => {
+            const pageItems = page.data?.fetchSourceManga?.mangas ?? [];
+            const filteredItems = hideLibraryEntries ? pageItems.filter((item) => !item.inLibrary) : pageItems;
+            collected = getUniqueMangas([...collected, ...filteredItems]);
+
+            const isLastFetchedPage = !page.isLoading && index === pages.length - 1;
+            if (isLastFetchedPage && !filteredItems.length && pageItems.length) {
+                filteredOutAllItems = true;
+            }
+        });
+
+        return { mangas: collected, filteredOutAllItemsOfFetchedPage: filteredOutAllItems };
+    }, [hideLibraryEntries, pages, shouldSkip]);
+
+    const hasNextPage = shouldSkip ? false : lastPage?.data?.fetchSourceManga?.hasNextPage ?? false;
+    const loadMore = useCallback(() => {
+        if (shouldSkip || !hasNextPage) {
+            return;
+        }
+        if (lastPage?.isLoading || lastPage?.isLoadingMore) {
+            return;
+        }
+
+        const nextPage = (lastPage?.size ?? 1) + 1;
+        fetchPage(nextPage).catch(defaultPromiseErrorHandler(`ModeOne::loadMore(${label})`));
+    }, [shouldSkip, hasNextPage, lastPage?.isLoading, lastPage?.isLoadingMore, lastPage?.size, fetchPage, label]);
+
+    return {
+        mangas,
+        isLoading: shouldSkip ? false : lastPage?.isLoading ?? false,
+        hasNextPage,
+        error: shouldSkip ? undefined : lastPage?.error,
+        loadMore,
+        filteredOutAllItemsOfFetchedPage,
+        warnings: filterPayload.warnings,
+    };
+};
+
+const useEnsureFeedCapacity = (
+    feed: ModeOneFeedState,
+    isActive: boolean,
+    requiredItems: number,
+) => {
+    const {
+        filteredOutAllItemsOfFetchedPage,
+        hasNextPage,
+        isLoading,
+        loadMore,
+        mangas,
+    } = feed;
+    useEffect(() => {
+        if (!isActive) {
+            return;
+        }
+
+        if (filteredOutAllItemsOfFetchedPage && hasNextPage && !isLoading) {
+            loadMore();
+            return;
+        }
+
+        if (mangas.length >= requiredItems || !hasNextPage || isLoading) {
+            return;
+        }
+
+        loadMore();
+    }, [
+        filteredOutAllItemsOfFetchedPage,
+        hasNextPage,
+        isActive,
+        isLoading,
+        loadMore,
+        mangas.length,
+        requiredItems,
+    ]);
+};
+
+export const ModeOne = () => {
+    const { t } = useTranslation();
+    useAppTitle(t('global.label.one_mode'));
+
+    const {
+        settings: { hideLibraryEntries },
+    } = useMetadataServerSettings();
+
+    const {
+        data: sourceList,
+        loading: isSourceListLoading,
+        error: sourceListError,
+        refetch,
+    } = requestManager.useGetSourceList({ notifyOnNetworkStatusChange: true });
+
+    const sources = sourceList?.sources.nodes ?? [];
+
+    const resolvedSources = useMemo(() => {
+        const mapping: Record<ModeOneSourceKey, SourceListFieldsFragment | undefined> = {
+            hentai2read: undefined,
+            hitomi: undefined,
+            ehentai: undefined,
+            hentaifox: undefined,
+        };
+
+        SOURCE_CONFIG.forEach(({ key, matchers }) => {
+            mapping[key] = sources.find((source) => matchesSource(source, matchers));
+        });
+
+        return mapping;
+    }, [sources]);
+
+    const hentai2readFilters = requestManager.useGetSource<GetSourceBrowseQuery, GetSourceBrowseQueryVariables>(
+        GET_SOURCE_BROWSE,
+        resolvedSources.hentai2read?.id ?? '',
+        { skip: !resolvedSources.hentai2read?.id },
+    );
+    const hitomiFilters = requestManager.useGetSource<GetSourceBrowseQuery, GetSourceBrowseQueryVariables>(
+        GET_SOURCE_BROWSE,
+        resolvedSources.hitomi?.id ?? '',
+        { skip: !resolvedSources.hitomi?.id },
+    );
+    const ehentaiFilters = requestManager.useGetSource<GetSourceBrowseQuery, GetSourceBrowseQueryVariables>(
+        GET_SOURCE_BROWSE,
+        resolvedSources.ehentai?.id ?? '',
+        { skip: !resolvedSources.ehentai?.id },
+    );
+    const hentaifoxFilters = requestManager.useGetSource<GetSourceBrowseQuery, GetSourceBrowseQueryVariables>(
+        GET_SOURCE_BROWSE,
+        resolvedSources.hentaifox?.id ?? '',
+        { skip: !resolvedSources.hentaifox?.id },
+    );
+
+    const descriptorsBySource = useMemo(() => ({
+        hentai2read: resolvedSources.hentai2read
+            ? flattenSourceFilters((hentai2readFilters.data?.source?.filters as SourceFilters[]) ?? [])
+            : undefined,
+        hitomi: resolvedSources.hitomi
+            ? flattenSourceFilters((hitomiFilters.data?.source?.filters as SourceFilters[]) ?? [])
+            : undefined,
+        ehentai: resolvedSources.ehentai
+            ? flattenSourceFilters((ehentaiFilters.data?.source?.filters as SourceFilters[]) ?? [])
+            : undefined,
+        hentaifox: resolvedSources.hentaifox
+            ? flattenSourceFilters((hentaifoxFilters.data?.source?.filters as SourceFilters[]) ?? [])
+            : undefined,
+    }), [
+        resolvedSources,
+        hentai2readFilters.data?.source?.filters,
+        hitomiFilters.data?.source?.filters,
+        ehentaiFilters.data?.source?.filters,
+        hentaifoxFilters.data?.source?.filters,
+    ]);
+
+    const aggregatedFilters = useMemo(
+        () => buildAggregatedFilters(descriptorsBySource),
+        [descriptorsBySource],
+    );
+
+    const resolvedKeys = useMemo(
+        () => SOURCE_CONFIG.map(({ key }) => key).filter((key) => !!resolvedSources[key]),
+        [resolvedSources],
+    );
+
+    const [filterSelection, setFilterSelection] = useState<ModeOneFilterSelection>({});
+    const [searchQuery, setSearchQuery] = useState('');
+    const [strictOnly, setStrictOnly] = useLocalStorage('mode-one-strict-only', false);
+    const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
+
+    const filterPayloads = useMemo(
+        () => buildFilterPayloads(aggregatedFilters, filterSelection, strictOnly ?? false, resolvedKeys, t),
+        [aggregatedFilters, filterSelection, resolvedKeys, strictOnly, t],
+    );
+
+    const activeKeys = useMemo(
+        () => resolvedKeys.filter((key) => filterPayloads[key].shouldInclude),
+        [filterPayloads, resolvedKeys],
+    );
+
+    const hentai2readFeed = useSourceFeed(
+        resolvedSources.hentai2read?.id,
+        hideLibraryEntries,
+        'hentai2read',
+        filterPayloads.hentai2read,
+        searchQuery,
+    );
+    const hitomiFeed = useSourceFeed(
+        resolvedSources.hitomi?.id,
+        hideLibraryEntries,
+        'hitomi',
+        filterPayloads.hitomi,
+        searchQuery,
+    );
+    const ehentaiFeed = useSourceFeed(
+        resolvedSources.ehentai?.id,
+        hideLibraryEntries,
+        'ehentai',
+        filterPayloads.ehentai,
+        searchQuery,
+    );
+    const hentaifoxFeed = useSourceFeed(
+        resolvedSources.hentaifox?.id,
+        hideLibraryEntries,
+        'hentaifox',
+        filterPayloads.hentaifox,
+        searchQuery,
+    );
+
+    const feedByKey: Record<ModeOneSourceKey, ModeOneFeedState> = useMemo(
+        () => ({
+            hentai2read: hentai2readFeed,
+            hitomi: hitomiFeed,
+            ehentai: ehentaiFeed,
+            hentaifox: hentaifoxFeed,
+        }),
+        [hentai2readFeed, hitomiFeed, ehentaiFeed, hentaifoxFeed],
+    );
+
+    const [batchCount, setBatchCount] = useState(1);
+
+    useEffect(() => {
+        setBatchCount(1);
+    }, [activeKeys.length]);
+
+    const requiredItemsPerSource = batchCount * BATCH_SIZE_PER_SOURCE;
+
+    useEnsureFeedCapacity(
+        feedByKey.hentai2read,
+        !!resolvedSources.hentai2read && filterPayloads.hentai2read.shouldInclude,
+        requiredItemsPerSource,
+    );
+    useEnsureFeedCapacity(
+        feedByKey.hitomi,
+        !!resolvedSources.hitomi && filterPayloads.hitomi.shouldInclude,
+        requiredItemsPerSource,
+    );
+    useEnsureFeedCapacity(
+        feedByKey.ehentai,
+        !!resolvedSources.ehentai && filterPayloads.ehentai.shouldInclude,
+        requiredItemsPerSource,
+    );
+    useEnsureFeedCapacity(
+        feedByKey.hentaifox,
+        !!resolvedSources.hentaifox && filterPayloads.hentaifox.shouldInclude,
+        requiredItemsPerSource,
+    );
+
+    const { items: displayedMangas, warnings: mangaWarnings } = useMemo(() => {
+        if (!activeKeys.length) {
+            return { items: [] as MangaCardProps['manga'][], warnings: {} as Record<number, string[]> };
+        }
+
+        const items: MangaCardProps['manga'][] = [];
+        const warningsByManga: Record<number, string[]> = {};
+
+        for (let batch = 0; batch < batchCount; batch += 1) {
+            for (let offset = 0; offset < BATCH_SIZE_PER_SOURCE; offset += 1) {
+                activeKeys.forEach((key) => {
+                    const index = batch * BATCH_SIZE_PER_SOURCE + offset;
+                    const manga = feedByKey[key].mangas[index];
+                    if (manga) {
+                        items.push(manga);
+                        if (feedByKey[key].warnings.length) {
+                            warningsByManga[manga.id] = feedByKey[key].warnings;
+                        }
+                    }
+                });
+            }
+        }
+
+        return { items: getUniqueMangas(items), warnings: warningsByManga };
+    }, [activeKeys, batchCount, feedByKey]);
+
+    const hasNextPage = useMemo(() => {
+        if (!activeKeys.length) {
+            return false;
+        }
+
+        return activeKeys.some((key) => {
+            const feed = feedByKey[key];
+            if (feed.isLoading) {
+                return true;
+            }
+
+            const loadedItems = feed.mangas.length;
+            return loadedItems > requiredItemsPerSource || feed.hasNextPage;
+        });
+    }, [activeKeys, feedByKey, requiredItemsPerSource]);
+
+    const handleLoadMore = useCallback(() => {
+        if (!activeKeys.length) {
+            return;
+        }
+
+        const nextRequiredItems = (batchCount + 1) * BATCH_SIZE_PER_SOURCE;
+        const canGrow = activeKeys.some((key) => {
+            const feed = feedByKey[key];
+            return feed.mangas.length >= nextRequiredItems || feed.hasNextPage || feed.isLoading;
+        });
+
+        if (!canGrow) {
+            return;
+        }
+
+        setBatchCount((current) => current + 1);
+    }, [activeKeys, batchCount, feedByKey]);
+
+    const feedError = activeKeys
+        .map((key) => feedByKey[key].error)
+        .find(Boolean);
+
+    const handleSelectionChange = useCallback(
+        (filterKey: string, value: ModeOneFilterSelection[string] | null) => {
+            setFilterSelection((previous) => {
+                if (!value || (value.type === 'checkbox' && !value.value)) {
+                    const { [filterKey]: _, ...rest } = previous;
+                    return rest;
+                }
+
+                return {
+                    ...previous,
+                    [filterKey]: value,
+                };
+            });
+        },
+        [],
+    );
+
+    const handleResetFilters = useCallback(() => {
+        setFilterSelection({});
+        setSearchQuery('');
+        setStrictOnly(false);
+    }, [setStrictOnly]);
+
+    if (sourceListError) {
+        return (
+            <EmptyViewAbsoluteCentered
+                message={t('global.error.label.failed_to_load_data')}
+                messageExtra={getErrorMessage(sourceListError)}
+                retry={() => refetch().catch(defaultPromiseErrorHandler('ModeOne::refetchSources'))}
+            />
+        );
+    }
+
+    if (!resolvedKeys.length) {
+        if (isSourceListLoading) {
+            return <LoadingPlaceholder />;
+        }
+
+        return <EmptyViewAbsoluteCentered message={t('source.error.label.no_sources_found')} />;
+    }
+
+    return (
+        <>
+            <Stack direction="row" justifyContent="flex-end" sx={{ px: 2, pb: 1 }}>
+                <Button
+                    startIcon={<FilterListIcon />}
+                    variant="outlined"
+                    onClick={() => setIsFilterPanelOpen(true)}
+                >
+                    {t('modeOne.filters.open')}
+                </Button>
+            </Stack>
+            <BaseMangaGrid
+                mangas={displayedMangas}
+                isLoading={
+                    isSourceListLoading ||
+                    activeKeys.some((key) => feedByKey[key].isLoading && !feedByKey[key].mangas.length)
+                }
+                hasNextPage={hasNextPage}
+                loadMore={handleLoadMore}
+                message={feedError ? t('global.error.label.failed_to_load_data') : undefined}
+                messageExtra={feedError ? getErrorMessage(feedError) : undefined}
+                retry={feedError ? () => handleLoadMore() : undefined}
+                inLibraryIndicator
+                mode="source"
+                mangaWarnings={mangaWarnings}
+            />
+            <ModeOneFilterPanel
+                open={isFilterPanelOpen}
+                onClose={() => setIsFilterPanelOpen(false)}
+                aggregatedFilters={aggregatedFilters}
+                selection={filterSelection}
+                onSelectionChange={handleSelectionChange}
+                query={searchQuery}
+                onQueryChange={setSearchQuery}
+                strictOnly={strictOnly ?? false}
+                onStrictOnlyChange={setStrictOnly}
+                onReset={handleResetFilters}
+            />
+        </>
+    );
+};
+
+export default ModeOne;

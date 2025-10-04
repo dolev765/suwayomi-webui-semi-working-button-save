@@ -1,0 +1,11 @@
+Backup Information
+==================
+
+Timestamp: 20251003_164746
+Source: /mnt/c/webui
+
+Statistics:
+  Files copied: 1258
+  Directories: 213
+  Total size: 14.61 MB
+  Items skipped: 11

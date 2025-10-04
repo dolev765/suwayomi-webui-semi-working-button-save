@@ -1,0 +1,12 @@
+node_modules/
+.eslintcache
+.vscode
+.env
+.idea
+
+build/*
+
+src/lib/graphql/schema.json
+
+# Large files that exceed GitHub limits
+*.jar

@@ -1,0 +1,12 @@
+Backup Information
+==================
+
+Timestamp: 20251003_165149
+Source: /mnt/c/webui
+Message: Hourly auto-backup
+
+Statistics:
+  Files copied: 1259
+  Directories: 213
+  Total size: 14.61 MB
+  Items skipped: 12
