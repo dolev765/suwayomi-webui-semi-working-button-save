@@ -1,0 +1,1 @@
+function u(i,...e){const t={...i};for(const r of e)for(const n in r){const o=r[n],c=t[n];typeof c=="function"&&typeof o=="function"?t[n]=(...s)=>(c(...s),o(...s)):t[n]=o}return t}class p{static preventRipple(){return e=>e.stopPropagation()}static preventRippleProp(...e){return u(e[0],...e.slice(1),{onMouseDown:p.preventRipple(),onTouchStart:p.preventRipple()})}}export{p as M};

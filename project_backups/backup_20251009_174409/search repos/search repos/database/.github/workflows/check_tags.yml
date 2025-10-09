@@ -1,0 +1,47 @@
+name: check_tags
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespaces:
+        description: 要检查的命名空间，使用“,”分隔
+        type: string
+        required: false
+  schedule:
+    - cron: 30 7 5/15 * *
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 如果需要在 Fork 中定时运行
+    #
+    # 在 https://github.com/<OWNER>/<REPO>/settings/variables/actions 设置 `ENABLE_CHECK_TAGS` 为 `true`
+    # 并在 https://github.com/<OWNER>/<REPO>/settings/secrets/actions 设置合适的 `EH_COOKIE` 以增加配额
+    #
+    # 为了减少对 EH 服务器的压力，建议删除所有无需覆盖的翻译
+    #
+    # 参考 https://github.com/EhTagTranslation/Editor/blob/e102b273afb4b57c98840e4a293d28421caf9215/src/shared/ehentai/http/config.ts#L21-L28
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.ENABLE_CHECK_TAGS == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      - name: Download tool
+        run: ./scripts/init.sh
+
+      - name: Build
+        env:
+          EH_COOKIE: ${{ secrets.EH_COOKIE }}
+        run:
+          node --enable-source-maps tool
+            create-release . ./publish
+              --strict
+              --source-check ${{ inputs.namespaces }}
+              ${{ github.repository == 'EhTagTranslation/Database' && '--coverage' || ''}}

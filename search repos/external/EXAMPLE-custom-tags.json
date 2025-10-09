@@ -1,0 +1,60 @@
+{
+    "comment": "Example custom tag mapping file - rename to remove 'EXAMPLE-' prefix to activate",
+    "femdom": {
+        "aliases": [
+            "female domination",
+            "female dominance",
+            "fem dom",
+            "female supremacy"
+        ],
+        "category": "female",
+        "sites": {
+            "nhentai": "female-domination",
+            "ehentai": "femdom",
+            "hitomi": "femdom",
+            "gelbooru": "femdom"
+        }
+    },
+    "maledom": {
+        "aliases": [
+            "male domination",
+            "male dominance",
+            "male dom"
+        ],
+        "category": "male",
+        "sites": {
+            "nhentai": "male-domination",
+            "ehentai": "maledom"
+        }
+    },
+    "futanari": {
+        "aliases": [
+            "futa",
+            "dickgirl",
+            "futanarization",
+            "shemale"
+        ],
+        "category": "female",
+        "related": [
+            "transgender",
+            "intersex"
+        ]
+    },
+    "nakadashi": {
+        "aliases": [
+            "creampie",
+            "internal cumshot",
+            "cum inside"
+        ],
+        "category": "mixed"
+    },
+    "netorare": {
+        "aliases": [
+            "ntr",
+            "cuckolding",
+            "cuckold",
+            "cheating"
+        ],
+        "category": "mixed"
+    }
+}

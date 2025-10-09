@@ -1,0 +1,12 @@
+[
+  { "country": "Argentina", "id": "MLA" },
+  { "country": "Bolivia", "id": "MBO" },
+  { "country": "Brasil", "id": "MLB" },
+  { "country": "Paraguay", "id": "MLY" },
+  { "country": "Perú", "id": "MPE" },
+  { "country": "Uruguay", "id": "MLU" },
+  { "country": "México", "id": "MLM" },
+  { "country": "Ecuador", "id": "MEC" },
+  { "country": "Colombia", "id": "MCO" },
+  { "country": "Venezuela", "id": "MLV" }
+]

@@ -1,0 +1,26 @@
+name: CI Pull Request
+on:
+  pull_request:
+jobs:
+  build:
+    name: ci-pull-request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up NodeJs
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: 'package.json'
+
+      - name: Install modules
+        run: yarn ci
+
+      - name: Run ESLint
+        run: yarn lint
+
+      - name: Run TSC
+        run: yarn tsc
+
+      - name: Build app
+        run: yarn build

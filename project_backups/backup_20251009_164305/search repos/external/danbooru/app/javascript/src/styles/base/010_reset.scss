@@ -1,0 +1,45 @@
+html {
+  // Disable font boosting on mobile. By default, when desktop mode is enabled
+  // on mobile, mobile browsers will automagically increase the size of text.
+  // Usually they do so poorly, making things like headers smaller than body
+  // text, which breaks the layout.
+  text-size-adjust: none;
+}
+
+html, body {
+  height: 100%;
+}
+
+*, ::before, ::after {
+  box-sizing: border-box;
+  border-width: 0;
+  border-style: solid;
+  border-color: var(--default-border-color);
+}
+
+body, h1, h2, h3, h4, h5, h6, p, ul, ol, li, blockquote, pre, dl, dd, menu, input {
+  margin: 0;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+ol, ul, menu {
+  padding: 0;
+  list-style: none;
+}
+
+input, select, textarea, button {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+img, svg, video, canvas, iframe {
+  display: block;
+  vertical-align: middle; // Used for `display: inline` images
+}

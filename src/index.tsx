@@ -6,15 +6,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import { App } from '@/App';
+import '@/index.css';
 import '@/polyfill.manual';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from '@/App';
-import '@/index.css';
 // roboto font
-import '@fontsource/roboto';
+import { initializeTagSynonyms } from '@/features/mode-one/services/tagSynonyms.ts';
 import { defaultPromiseErrorHandler } from '@/lib/DefaultPromiseErrorHandler.ts';
 import '@/lib/dayjs/Setup.ts';
+import '@fontsource/roboto';
+import './utils/streamingFetchShim';
 
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker.ready.then((registration) => {
@@ -27,6 +29,11 @@ if ('serviceWorker' in navigator) {
     });
 }
 
+// Initialize tag synonym database for smart tag search
+initializeTagSynonyms().catch((error) => {
+    console.warn('Failed to initialize tag synonyms:', error);
+});
+
 const container = document.getElementById('root');
 const root = createRoot(container!);
 root.render(
@@ -34,4 +41,4 @@ root.render(
         <App />
     </StrictMode>,
 );
-import './utils/streamingFetchShim';
+

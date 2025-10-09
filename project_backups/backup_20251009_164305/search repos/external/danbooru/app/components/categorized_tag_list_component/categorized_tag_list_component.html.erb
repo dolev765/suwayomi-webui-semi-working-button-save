@@ -1,0 +1,19 @@
+<div class="tag-list categorized-tag-list">
+  <% categorized_tags(TagCategory.split_header_list).each do |category_name, tags| %>
+    <h3 class="<%= category_name %>-tag-list">
+      <%= category_name.titleize.pluralize(tags.length) %>
+    </h3>
+
+    <ul class="<%= category_name %>-tag-list">
+      <% if category_name.in?(NESTABLE_TAG_CATEGORIES) %>
+        <% tag_tree(tags).each do |t, subtags| %>
+          <%= render CategorizedTagListEntryComponent.new(t, subtags, level: 0) %>
+        <% end %>
+      <% else %>
+        <% tags.each do |t| %>
+          <%= render CategorizedTagListEntryComponent.new(t) %>
+        <% end %>
+      <% end %>
+    </ul>
+  <% end %>
+</div>

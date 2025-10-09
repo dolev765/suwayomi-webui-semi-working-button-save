@@ -1,0 +1,24 @@
+<ul>
+  <% autocomplete_results.each do |result| %>
+    <%= tag.li class: "ui-menu-item", "data-autocomplete-type": result.type, "data-autocomplete-value": result.value, "data-autocomplete-category": result.category, "data-autocomplete-proper-name": result.tag&.proper_name do %>
+      <div class="ui-menu-item-wrapper flex items-center" tabindex="-1">
+        <%= link_to_result result do %>
+          <% if result.type == "emoji" %>
+            <div class="inline-block prose"><%= DText.new(result.value, inline: true).format_text %></div>
+            <span class="autocomplete-text"><%= highlight_result(result) %></span>
+          <% elsif result.antecedent.present? %>
+            <span class="autocomplete-antecedent"><%= highlight_antecedent(result) %></span>
+            <span class="autocomplete-arrow">→</span>
+            <%= result.label %>
+          <% else %>
+            <%= highlight_result(result) %>
+          <% end %>
+        <% end %>
+
+        <% if result.post_count %>
+          <%= tag.span humanized_number(result.post_count), class: "post-count" %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+</ul>

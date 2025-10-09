@@ -466,7 +466,7 @@
       "menu": "Menu",
       "mobile": "Mobile",
       "more": "More",
-      "one_mode": "1 mode",
+      "one_mode": "Browse All",
       "never": "Never",
       "next": "Next",
       "none": "None",
@@ -1690,47 +1690,47 @@
   },
   "modeOne": {
     "filters": {
-      "title": "Mode One Filters",
-      "queryLabel": "Search query",
-      "strictOnly": "Only show sources matching all filters exactly",
-      "open": "Filters",
+      "title": "Filter Your Search",
+      "queryLabel": "What are you looking for?",
+      "strictOnly": "Show only exact matches across all sources",
+      "open": "Search Filters",
       "checkboxLabel": "{{label}}",
       "tri": {
         "include": "Include",
         "exclude": "Exclude",
         "ignore": "Ignore"
       },
-      "noneAvailable": "No filters are available for the selected sources.",
-      "reset": "Reset filters",
-      "active": "Active filters",
+      "noneAvailable": "No filters available for your selected sources.",
+      "reset": "Clear all filters",
+      "active": "Currently filtering by",
       "chip": {
         "checkbox": "Enabled",
         "text": "{{value}}"
       },
       "placeholder": {
-        "select": "Enter exact value",
+        "select": "Choose an option",
         "checkbox": "Type on/off",
         "tri": "Type include/exclude",
-        "text": "Enter tags (comma separated)",
+        "text": "Add tags (use commas)",
         "tag": "Search tags"
       },
       "hint": {
-        "available": "Available: {{values}}",
-        "available_more": "Available: {{values}}, +{{count}} more",
+        "available": "Options: {{values}}",
+        "available_more": "Options: {{values}}, +{{count}} more",
         "text": "Separate multiple tags with commas."
       },
       "tagSearch": {
-        "placeholder": "Search combined tags",
-        "help": "Type a tag name to see supporting sources.",
+        "placeholder": "Search for tags",
+        "help": "Search for any tag to find sources that have it.",
         "hint": "This tag is available in {{count}} source(s).",
-        "missing": "Tag not found in scanned sources."
+        "missing": "No sources have this tag yet."
       }
     },
     "warning": {
       "tooltip": "Some filters were not applied",
       "title": "Unsupported filters",
       "missingFilter": "{{source}} does not support \"{{filter}}\"",
-      "missingFilterValue": "{{source}} does not offer \"{{value}}\" for \"{{filter}}\""
+      "missingFilterValue": "{{source}} does not offer \"{{value}}\" in \"{{filter}}\""
     }
   },
   "updates": {

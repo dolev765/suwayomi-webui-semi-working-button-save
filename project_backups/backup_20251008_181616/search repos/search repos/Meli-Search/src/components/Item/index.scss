@@ -1,0 +1,26 @@
+.container-item {
+  height: 15rem;
+  width: 15rem;
+  margin: 0.5rem;
+  background-color: rgb(253, 253, 253);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+
+  .img-item {
+    height: 8rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .price-item {
+    font-weight: 600;
+    font-size: 1.3em;
+  }
+
+  .title-item {
+    margin-top: 0.3rem;
+    text-align: center;
+  }
+}

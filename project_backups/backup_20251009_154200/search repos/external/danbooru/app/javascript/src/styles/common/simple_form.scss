@@ -1,0 +1,301 @@
+form.simple_form {
+  margin: 0 0 1em 0;
+
+  label {
+    font-weight: bold;
+  }
+
+  div.input {
+    margin-bottom: 1em;
+
+    input[type="text"], input[type="file"], input[type="password"], input[type="email"], input[type="url"] {
+      width: 100%;
+      max-width: 25em;
+    }
+
+    .hint {
+      padding-left: 1em;
+
+      @media (width <= 660px) {
+        padding-left: 0;
+        display: block;
+      }
+    }
+
+    &.field_with_errors {
+      input, select, textarea {
+        border: 1px solid var(--form-input-validation-error-border-color);
+      }
+
+      span.error {
+        display: block;
+        color: var(--form-input-validation-error-text-color);
+        font-style: italic;
+        font-size: var(--text-sm);
+      }
+    }
+
+    &.text {
+      .hint {
+        padding-left: 0;
+        display: block;
+      }
+
+      textarea {
+        width: 100%;
+        max-width: 60rem;
+        max-height: 15rem;
+
+        &.text  { height: 20vh; }
+      }
+    }
+
+    select[multiple] {
+      height: 20vh;
+      max-height: 15rem;
+    }
+
+    label {
+      display: block;
+      line-height: 1.5em;
+    }
+
+    // Hide "*" in label next to required fields.
+    &.required abbr[title="required"] {
+      display: none;
+    }
+
+    &.radio_buttons {
+      span.radio {
+        display: inline-block;
+        white-space: nowrap;
+      }
+
+      span.radio label {
+        font-weight: normal;
+        display: inline;
+        margin: 0 1rem 0 0.25rem;
+        vertical-align: middle;
+      }
+
+      // Show radio buttons as a rounded button group.
+      &.radio-button-group {
+        white-space: nowrap;
+
+        input {
+          // XXX .sr-only; Visually hide <input> without using `display: none`, since that would prevent focusing it.
+          position: absolute;
+          pointer-events: none;
+          opacity: 0;
+        }
+
+        .radio label {
+          display: inline-block;
+          margin: 0;
+          margin-right: 0;
+          padding: 0.25rem 0.33rem;
+          border-width: 1px;
+          border-radius: 0.25rem;
+          user-select: none;
+          cursor: pointer;
+
+          &:hover {
+            color: var(--inverse-text-color);
+            background-color: var(--link-hover-color);
+            border-color: var(--link-hover-color);
+          }
+        }
+
+        input:focus ~ label {
+          box-shadow: inset 0 0 0 2px var(--link-color);
+        }
+
+        input:checked ~ label {
+          &, &:hover {
+            color: var(--inverse-text-color);
+            background-color: var(--link-color);
+            border-color: var(--link-color);
+          }
+        }
+
+        .radio:not(:last-of-type) label {
+          border-top-right-radius: 0;
+          border-bottom-right-radius: 0;
+        }
+
+        .radio:not(:first-of-type) label {
+          margin-left: -1px;
+          border-top-left-radius: 0;
+          border-bottom-left-radius: 0;
+        }
+
+        &.field_with_errors .radio label {
+          border-color: var(--chip-red-border-color);
+          background-color: var(--chip-red-background-color);
+        }
+      }
+    }
+  }
+
+  &.stacked-hints {
+    span.hint {
+      display: block;
+      padding-left: 0;
+    }
+  }
+}
+
+form.inline-form {
+  display: table;
+  width: 100%;
+
+  > div.input {
+    display: table-row;
+    line-height: 2em;
+
+    label {
+      text-align: right;
+      padding-right: 1em;
+      white-space: nowrap;
+      width: 1%;
+    }
+
+    label, input {
+      display: table-cell;
+      line-height: 1em;
+    }
+
+    span.hint {
+      line-height: 1em;
+      padding-bottom: 0.5em;
+    }
+  }
+}
+
+form.quick-search-form {
+  margin: 0;
+
+  input {
+    background: var(--quick-search-form-background);
+  }
+}
+
+form.one-line-form {
+  > input, > div.input {
+    display: inline;
+
+    label {
+      display: inline;
+      margin-right: 1em;
+    }
+  }
+}
+
+form.stacked-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  div.input {
+    width: 100%;
+
+    input[type] {
+      max-width: unset;
+    }
+  }
+
+  div.notice {
+    width: 100%;
+  }
+}
+
+div.ui-dialog {
+  textarea, input[type="text"] {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  form.simple_form {
+    margin-bottom: 0;
+
+    textarea, input[type="text"] {
+      width: 100%;
+      max-width: 100%;
+    }
+
+    div.input {
+      margin-bottom: 0.5em;
+    }
+
+    div.input.hidden {
+      display: none;
+    }
+  }
+}
+
+div.inline-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  .checkbox { order: -1; }
+  .hint { order: 1; }
+}
+
+div.inline-toggle-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  .toggle-switch { order: -1; }
+  .hint { order: 1; }
+}
+
+input.toggle-switch {
+  appearance: none;
+  background-color: var(--toggle-switch-unselected-color);
+  border-color: transparent;
+  border-radius: 1rem;
+  border-width: 0.125rem;
+  height: 1em;
+  min-width: 2em;
+  transition: background-color 0.15s;
+  vertical-align: text-bottom;
+  cursor: pointer;
+  padding: 0;
+
+  &:checked {
+    background-color: var(--toggle-switch-selected-color);
+  }
+
+  &:checked::before {
+    margin-left: 1em;
+  }
+
+  &:indeterminate {
+    background-color: var(--toggle-switch-indeterminate-color);
+  }
+
+  &:indeterminate::before {
+    margin-left: 0.5em;
+  }
+
+  &::before {
+    display: block;
+    content: "";
+    background-color: var(--toggle-switch-handle-color);
+    height: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: 1rem;
+    transition: margin 0.15s;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:focus-visible {
+    outline-offset: 2px;
+  }
+}

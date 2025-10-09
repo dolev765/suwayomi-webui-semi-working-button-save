@@ -1,0 +1,413 @@
+/*
+ * Copyright (C) Contributors to the Suwayomi project
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+import { EmptyViewAbsoluteCentered } from '@/base/components/feedback/EmptyViewAbsoluteCentered.tsx';
+import { LoadingPlaceholder } from '@/base/components/feedback/LoadingPlaceholder.tsx';
+import { withPropsFrom } from '@/base/hoc/withPropsFrom.tsx';
+import { useChapterListOptions } from '@/features/chapter/utils/ChapterList.util.tsx';
+import { FALLBACK_MANGA } from '@/features/manga/Manga.constants.ts';
+import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle.ts';
+import { useNavBarContext } from '@/features/navigation-bar/NavbarContext.tsx';
+import { NavbarContextType } from '@/features/navigation-bar/NavigationBar.types.ts';
+import { useReaderAutoScrollContext } from '@/features/reader/auto-scroll/ReaderAutoScrollContext.tsx';
+import { useReaderStateChaptersContext } from '@/features/reader/contexts/state/ReaderStateChaptersContext.tsx';
+import { useReaderStateMangaContext } from '@/features/reader/contexts/state/ReaderStateMangaContext.tsx';
+import { userReaderStatePagesContext } from '@/features/reader/contexts/state/ReaderStatePagesContext.tsx';
+import { useReaderStateSettingsContext } from '@/features/reader/contexts/state/ReaderStateSettingsContext.tsx';
+import { ReaderRGBAFilter } from '@/features/reader/filters/ReaderRGBAFilter.tsx';
+import { useReaderResetStates } from '@/features/reader/hooks/useReaderResetStates.ts';
+import { useReaderSetChaptersState } from '@/features/reader/hooks/useReaderSetChaptersState.ts';
+import { useReaderSetSettingsState } from '@/features/reader/hooks/useReaderSetSettingsState.ts';
+import { useReaderShowSettingPreviewOnChange } from '@/features/reader/hooks/useReaderShowSettingPreviewOnChange.ts';
+import { useTranslationSession } from '@/features/reader/hooks/useTranslationSession.ts';
+import { ReaderHotkeys } from '@/features/reader/hotkeys/ReaderHotkeys.tsx';
+import { ReaderStatePages } from '@/features/reader/overlay/progress-bar/ReaderProgressBar.types.ts';
+import { ReaderOverlay } from '@/features/reader/overlay/ReaderOverlay.tsx';
+import { TReaderOverlayContext } from '@/features/reader/overlay/ReaderOverlay.types.ts';
+import { useReaderOverlayContext } from '@/features/reader/overlay/ReaderOverlayContext.tsx';
+import {
+    IReaderSettings,
+    IReaderSettingsWithDefaultFlag,
+    ReaderStateChapters,
+    TReaderAutoScrollContext,
+    TReaderStateMangaContext,
+    TReaderStateSettingsContext
+} from '@/features/reader/Reader.types.ts';
+import { ReaderService } from '@/features/reader/services/ReaderService.ts';
+import { READER_BACKGROUND_TO_COLOR } from '@/features/reader/settings/ReaderSettings.constants.tsx';
+import { useDefaultReaderSettings } from '@/features/reader/settings/ReaderSettingsMetadata.ts';
+import { useReaderTapZoneContext } from '@/features/reader/tap-zones/ReaderTapZoneContext.tsx';
+import { TapZoneLayout } from '@/features/reader/tap-zones/TapZoneLayout.tsx';
+import { TReaderTapZoneContext } from '@/features/reader/tap-zones/TapZoneLayout.types.ts';
+import { ReaderViewer } from '@/features/reader/viewer/ReaderViewer.tsx';
+import { defaultPromiseErrorHandler } from '@/lib/DefaultPromiseErrorHandler.ts';
+import { GetChaptersReaderQuery, GetMangaReaderQuery } from '@/lib/graphql/generated/graphql.ts';
+import { GET_CHAPTERS_READER } from '@/lib/graphql/queries/ChapterQuery.ts';
+import { GET_MANGA_READER } from '@/lib/graphql/queries/MangaQuery.ts';
+import { getErrorMessage } from '@/lib/HelperFunctions.ts';
+import { requestManager } from '@/lib/requests/RequestManager.ts';
+import Box from '@mui/material/Box';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useParams } from 'react-router-dom';
+
+import ReaderTranslateButton from './ReaderTranslateButton';
+
+
+const BaseReader = ({
+    setOverride,
+    readerNavBarWidth,
+    isVisible: isOverlayVisible,
+    setIsVisible: setIsOverlayVisible,
+    manga,
+    setManga,
+    shouldSkipDupChapters,
+    shouldSkipFilteredChapters,
+    backgroundColor,
+    readingMode,
+    tapZoneLayout,
+    tapZoneInvertMode,
+    shouldShowReadingModePreview,
+    shouldShowTapZoneLayoutPreview,
+    setSettings,
+    mangaChapters,
+    initialChapter,
+    chapterForDuplicatesHandling,
+    currentChapter,
+    setReaderStateChapters,
+    setTotalPages,
+    setCurrentPageIndex,
+    setPageToScrollToIndex,
+    setPages,
+    setPageUrls,
+    setPageLoadStates,
+    setPagesOverride,
+    setTransitionPageMode,
+    cancelAutoScroll,
+    setShowPreview,
+}: Pick<NavbarContextType, 'setOverride' | 'readerNavBarWidth'> &
+    Pick<TReaderOverlayContext, 'isVisible' | 'setIsVisible'> &
+    Pick<TReaderStateMangaContext, 'manga' | 'setManga'> &
+    Pick<TReaderStateSettingsContext, 'setSettings'> &
+    Pick<
+        IReaderSettings,
+        | 'shouldSkipDupChapters'
+        | 'shouldSkipFilteredChapters'
+        | 'backgroundColor'
+        | 'shouldShowReadingModePreview'
+        | 'shouldShowTapZoneLayoutPreview'
+    > &
+    Pick<IReaderSettingsWithDefaultFlag, 'readingMode' | 'tapZoneLayout' | 'tapZoneInvertMode'> &
+    Pick<
+        ReaderStateChapters,
+        | 'mangaChapters'
+        | 'initialChapter'
+        | 'chapterForDuplicatesHandling'
+        | 'currentChapter'
+        | 'setReaderStateChapters'
+    > &
+    Pick<
+        ReaderStatePages,
+        | 'setTotalPages'
+        | 'setCurrentPageIndex'
+        | 'setPageToScrollToIndex'
+        | 'setPages'
+        | 'setPageUrls'
+        | 'setPageLoadStates'
+        | 'setPagesOverride'
+        | 'setTransitionPageMode'
+    > &
+    Pick<TReaderTapZoneContext, 'setShowPreview'> & {
+        cancelAutoScroll: TReaderAutoScrollContext['cancel'];
+    }) => {
+    const { t } = useTranslation();
+
+    const scrollElementRef = useRef<HTMLDivElement | null>(null);
+
+    const [areSettingsSet, setAreSettingsSet] = useState(false);
+
+    const { chapterSourceOrder: paramChapterSourceOrder, mangaId: paramMangaId } = useParams<{
+        chapterSourceOrder: string;
+        mangaId: string;
+    }>();
+    const chapterSourceOrder = Number(paramChapterSourceOrder);
+    const mangaId = Number(paramMangaId);
+
+    const mangaResponse = requestManager.useGetManga<GetMangaReaderQuery>(GET_MANGA_READER, mangaId);
+    const chaptersResponse = requestManager.useGetMangaChapters<GetChaptersReaderQuery>(GET_CHAPTERS_READER, mangaId);
+
+    useAppTitle(
+        !manga || !currentChapter
+            ? t('reader.title', { mangaId, chapterIndex: chapterSourceOrder })
+            : `${manga.title}: ${currentChapter.name}`,
+    );
+
+    const {
+        metadata: defaultSettingsMetadata,
+        settings: defaultSettings,
+        request: defaultSettingsResponse,
+    } = useDefaultReaderSettings();
+    const chapterListOptions = useChapterListOptions(manga ?? FALLBACK_MANGA);
+
+    const isLoading =
+        currentChapter === undefined ||
+        !areSettingsSet ||
+        mangaResponse.loading ||
+        chaptersResponse.loading ||
+        defaultSettingsResponse.loading;
+    const error = mangaResponse.error ?? chaptersResponse.error ?? defaultSettingsResponse.error;
+
+    useEffect(() => {
+        setManga(mangaResponse.data?.manga);
+    }, [mangaResponse.data?.manga]);
+
+    useReaderResetStates(
+        setManga,
+        setReaderStateChapters,
+        setCurrentPageIndex,
+        setPageToScrollToIndex,
+        setTotalPages,
+        setPages,
+        setPageUrls,
+        setPageLoadStates,
+        setTransitionPageMode,
+        setIsOverlayVisible,
+        setSettings,
+        cancelAutoScroll,
+    );
+    useReaderSetSettingsState(
+        mangaResponse,
+        defaultSettingsResponse,
+        defaultSettings,
+        defaultSettingsMetadata,
+        setSettings,
+        setAreSettingsSet,
+    );
+    useReaderShowSettingPreviewOnChange(
+        isLoading,
+        error,
+        areSettingsSet,
+        readingMode,
+        tapZoneLayout,
+        tapZoneInvertMode,
+        shouldShowReadingModePreview,
+        shouldShowTapZoneLayoutPreview,
+        setShowPreview,
+    );
+    useReaderSetChaptersState(
+        chaptersResponse,
+        chapterSourceOrder,
+        mangaChapters,
+        initialChapter,
+        chapterForDuplicatesHandling,
+        setReaderStateChapters,
+        shouldSkipDupChapters,
+        shouldSkipFilteredChapters,
+        chapterListOptions,
+    );
+
+    // Handle translation session from URL
+    useTranslationSession({
+        mangaId,
+        chapterSourceOrder,
+        isLoading,
+        setPageUrls,
+        setPages,
+        setPageLoadStates,
+        setTotalPages,
+        setPagesOverride,
+        setCurrentPageIndex,
+        setPageToScrollToIndex,
+        setTransitionPageMode,
+    });
+
+    useLayoutEffect(() => {
+        setOverride({
+            status: true,
+            value: (
+                <Box sx={{ position: 'absolute' }}>
+                    <ReaderHotkeys scrollElementRef={scrollElementRef} />
+                    <ReaderOverlay isVisible={isOverlayVisible} />
+                    {!scrollElementRef.current && (
+                        <Box
+                            onClick={() => setIsOverlayVisible(!isOverlayVisible)}
+                            sx={{
+                                position: 'fixed',
+                                top: 0,
+                                left: 0,
+                                width: '100vw',
+                                height: '100vh',
+                                background: 'transparent',
+                            }}
+                        />
+                    )}
+                </Box>
+            ),
+        });
+
+        return () => setOverride({ status: false, value: null });
+    }, [isOverlayVisible, setIsOverlayVisible, scrollElementRef.current]);
+
+    if (error) {
+        return (
+            <EmptyViewAbsoluteCentered
+                message={t('global.error.label.failed_to_load_data')}
+                messageExtra={getErrorMessage(error)}
+                retry={() => {
+                    if (mangaResponse.error) {
+                        mangaResponse.refetch().catch(defaultPromiseErrorHandler('Reader::refetchManga'));
+                    }
+
+                    if (defaultSettingsResponse.error) {
+                        defaultSettingsResponse
+                            .refetch()
+                            .catch(defaultPromiseErrorHandler('Reader::refetchDefaultSettings'));
+                    }
+
+                    if (chaptersResponse.error) {
+                        chaptersResponse.refetch().catch(defaultPromiseErrorHandler('Reader::refetchChapters'));
+                    }
+                }}
+            />
+        );
+    }
+
+    if (isLoading) {
+        return (
+            <Box
+                sx={{
+                    height: '100vh',
+                    width: '100vw',
+                    display: 'grid',
+                    placeItems: 'center',
+                }}
+            >
+                <LoadingPlaceholder />
+            </Box>
+        );
+    }
+
+    if (currentChapter === null) {
+        return <EmptyViewAbsoluteCentered message={t('reader.error.label.chapter_not_found')} />;
+    }
+
+    if (!manga || !currentChapter) {
+        // This should ideally not happen after the checks above, but as a safeguard
+        return null;
+    }
+
+    return (
+        <>
+            {/* Settings and Translate buttons positioned fixed at the bottom right of screen */}
+            <Box sx={{ position: 'fixed', bottom: 20, right: 20, zIndex: 9999, display: 'flex', gap: 1, pointerEvents: 'auto' }}>
+                <ReaderTranslateButton mangaId={mangaId} chapterId={chapterSourceOrder} />
+            </Box>
+
+            {/* Main reader content */}
+            <Box
+                sx={{
+                    position: 'relative',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    width: `calc(100vw - ${readerNavBarWidth}px)`,
+                    height: `100vh`,
+                    marginLeft: `${readerNavBarWidth}px`,
+                    transition: (theme) =>
+                        `width 0.${theme.transitions.duration.shortest}s, margin-left 0.${theme.transitions.duration.shortest}s`,
+                    overflow: 'auto',
+                    backgroundColor: READER_BACKGROUND_TO_COLOR[backgroundColor]
+                }}
+            >
+                {/* Existing reader content */}
+                <ReaderViewer ref={scrollElementRef} />
+                <TapZoneLayout />
+                <ReaderRGBAFilter />
+            </Box>
+        </>
+    );
+};
+
+export const Reader = withPropsFrom(
+    memo(BaseReader),
+    [
+        useNavBarContext,
+        useReaderOverlayContext,
+        useReaderStateMangaContext,
+        useReaderStateChaptersContext,
+        useReaderStateSettingsContext,
+        () => {
+            const {
+                shouldSkipDupChapters,
+                shouldSkipFilteredChapters,
+                backgroundColor,
+                shouldShowReadingModePreview,
+                shouldShowTapZoneLayoutPreview,
+            } = ReaderService.useSettingsWithoutDefaultFlag();
+            return {
+                shouldSkipDupChapters,
+                shouldSkipFilteredChapters,
+                backgroundColor,
+                shouldShowReadingModePreview,
+                shouldShowTapZoneLayoutPreview,
+            };
+        },
+        () => {
+            const { readingMode, tapZoneLayout, tapZoneInvertMode } = ReaderService.useSettings();
+            return { readingMode, tapZoneLayout, tapZoneInvertMode };
+        },
+        userReaderStatePagesContext,
+        () => ({ cancelAutoScroll: useReaderAutoScrollContext().cancel }),
+        useReaderTapZoneContext,
+    ],
+    [
+        'setOverride',
+        'readerNavBarWidth',
+        'isVisible',
+        'setIsVisible',
+        'manga',
+        'setManga',
+        'shouldSkipDupChapters',
+        'shouldSkipFilteredChapters',
+        'backgroundColor',
+        'readingMode',
+        'tapZoneLayout',
+        'tapZoneInvertMode',
+        'shouldShowReadingModePreview',
+        'shouldShowTapZoneLayoutPreview',
+        'setSettings',
+        'mangaChapters',
+        'initialChapter',
+        'chapterForDuplicatesHandling',
+        'currentChapter',
+        'setReaderStateChapters',
+        'setTotalPages',
+        'setCurrentPageIndex',
+        'setPageToScrollToIndex',
+        'setPages',
+        'setPageUrls',
+        'setPageLoadStates',
+        'setPagesOverride',
+        'setTransitionPageMode',
+        'cancelAutoScroll',
+        'setShowPreview',
+    ],
+);
+
+
+
+
+
+
+
+
+
+
+
+
+
+

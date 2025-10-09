@@ -84,4 +84,4 @@ export const MODE_ONE_SOURCE_LABELS: Record<ModeOneSourceKey, string> = {
 export const MODE_ONE_QUERY_FALLBACK_SOURCES: ModeOneSourceKey[] = ['hentaifox', 'hentai2read', 'hitomi'];
 
 export const TAG_FILTER_LABEL_PATTERN =
-    /(tag|group|artist|series|character|type|genre|theme|category|categories|parody|language|collection|content)/i;
+    /(^tag(?!:)|tags|content tag|content)/i;

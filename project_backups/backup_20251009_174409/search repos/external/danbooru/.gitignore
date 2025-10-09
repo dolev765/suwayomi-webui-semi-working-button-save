@@ -1,0 +1,14 @@
+.env.*
+.gitconfig
+.irb_history
+/config/danbooru_local_config.rb
+/node_modules/
+/log/
+/tmp/
+/public/data/
+/public/packs-dev/
+/public/packs-test/
+/public/packs/
+lib/dtext_rb/ext/dtext/Makefile
+lib/dtext_rb/ext/dtext/dtext.cpp
+.history

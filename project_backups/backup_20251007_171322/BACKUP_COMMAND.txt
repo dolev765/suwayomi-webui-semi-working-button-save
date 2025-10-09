@@ -1,0 +1,98 @@
+╔════════════════════════════════════════════════════════════╗
+║     COMMAND TO USE WITH YOUR CHANGE DETECTION SCRIPT       ║
+╚════════════════════════════════════════════════════════════╝
+
+RECOMMENDED COMMAND:
+═══════════════════
+
+    ./auto_backup
+
+This single command will:
+✓ Create a new timestamped folder (e.g., backup_20251003_143022/)
+✓ Copy all your project files to that folder
+✓ Exclude unnecessary files (node_modules, .git, logs, etc.)
+✓ Create a backup_info.txt file with metadata
+✓ Preserve file permissions and symlinks
+
+
+ALTERNATIVE COMMANDS:
+════════════════════
+
+1. With description message:
+   ./auto_backup -m "Auto-detected file change"
+
+2. With timestamp in message:
+   ./auto_backup -m "Auto-backup: $(date '+%Y-%m-%d %H:%M:%S')"
+
+3. Custom backup directory:
+   ./auto_backup -d /path/to/custom/backup/location
+
+
+EXAMPLE INTEGRATION:
+══════════════════
+
+If your change detection script looks like this:
+
+    #!/bin/bash
+    # Your existing script that detects changes
+    while true; do
+        if [[ changes_detected ]]; then
+            # PUT THIS COMMAND HERE:
+            ./auto_backup
+        fi
+        sleep 5
+    done
+
+
+WHAT HAPPENS:
+═════════════
+
+When you run: ./auto_backup
+
+1. Creates: project_backups/backup_YYYYMMDD_HHMMSS/
+2. Copies all files from current directory
+3. Excludes: node_modules, .git, buildZip, *.log, etc.
+4. Saves metadata in backup_info.txt
+
+Example folder structure:
+
+project_backups/
+├── backup_20251003_140000/
+│   ├── backup_info.txt
+│   ├── src/
+│   ├── package.json
+│   └── ... (all your files)
+├── backup_20251003_141500/
+│   ├── backup_info.txt
+│   └── ... (another backup)
+└── backup_20251003_143000/
+    └── ... (another backup)
+
+
+AUTOMATIC WATCHING:
+═══════════════════
+
+Or use our included watcher script (no need for your own):
+
+    ./watch_and_backup.sh
+
+This will automatically watch for file changes and create backups!
+
+
+CLEANUP OLD BACKUPS:
+════════════════════
+
+To keep only the last 10 backups:
+
+    ./cleanup_backups.sh
+
+
+QUICK START:
+════════════
+
+1. Build (already done):   make
+2. Test it:                 ./auto_backup
+3. Check result:            ls -la project_backups/
+
+That's it! 🎉
+

@@ -1,0 +1,1 @@
+System.register(["./index-legacy-DbvsbuFI.js"],function(e,t){"use strict";var n,s;return{setters:[function(e){n=e.c,s=e.j}],execute:function(){e("A",n(s.jsx("path",{d:"M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"})))}}});

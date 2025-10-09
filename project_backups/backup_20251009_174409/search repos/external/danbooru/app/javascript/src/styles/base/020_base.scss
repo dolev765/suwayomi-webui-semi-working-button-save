@@ -1,0 +1,177 @@
+html {
+  --text-xxs: 0.5625rem; // 9px
+  --text-xs: 0.6875rem;  // 11px
+  --text-sm: 0.75rem;    // 12px
+  --text-md: 0.875rem;   // 14px
+  --text-lg: 1rem;       // 16px
+  --text-xl: 1.3125rem;  // 21px
+  --text-xxl: 1.75rem;   // 28px
+  --emoji-font: "Twemoji";
+  --header-font: "Tahoma", "Verdana", "Helvetica", var(--emoji-font), sans-serif;
+  --body-font: "Verdana", "Helvetica", var(--emoji-font), sans-serif;
+  --monospace-font: monospace;
+  --arial-font: "Arial", "Helvetica", sans-serif;
+}
+
+/*
+ * Make sure elements with the HTML5 [hidden] attribute (e.g. <span hidden>blah</span>)
+ * really are hidden. Otherwise the `display` property can override the [hidden] attribute.
+ */
+[hidden], [x-cloak] {
+  display: none !important;
+}
+
+/* Reserve space for the scrollbar so the layout doesn't shift when the scrollbar appears/disappears, except in fullscreen mode. */
+html:not(:has(:fullscreen)) {
+  scrollbar-gutter: stable;
+}
+
+body {
+  color: var(--text-color);
+  background-color: var(--body-background-color);
+  font-family: var(--body-font);
+  font-size: var(--text-md);
+  line-height: 1.25em;
+}
+
+dd {
+  margin-bottom: 1em;
+}
+
+dt {
+  font-weight: bold;
+}
+
+h1, h2, h3, h4, h5, h6, .heading {
+  font-family: var(--header-font);
+  font-weight: bold;
+  line-height: 1.5em;
+  color: var(--header-color);
+}
+
+h1 {
+  font-size: var(--text-xxl);
+}
+
+h2 {
+  font-size: var(--text-lg);
+}
+
+h3, h4, h5, h6 {
+  font-size: var(--text-md);
+}
+
+input, select, textarea, button {
+  background-color: var(--form-input-background);
+  border-color: var(--form-input-border-color);
+  border-width: 1px;
+  padding: 0.125rem 0.25rem;
+}
+
+:where(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--checkbox-selected-color);
+}
+
+/* placeholder text in <input type="text"> elements */
+::placeholder {
+  color: var(--form-input-placeholder-text-color);
+  font-size: 0.9em;
+  padding-left: 0.5em;
+}
+
+// Text selected by mouse or keyboard.
+::selection {
+  color: var(--inverse-text-color);
+  background-color: var(--selection-background-color);
+}
+
+// Text selected by text fragment links (e.g. https: //example.com#:~:text=blah)
+::target-text {
+  color: var(--inverse-text-color);
+  background-color: var(--target-text-background-color);
+}
+
+// Highlight elements selected by link anchor targets (e.g. /forum_topics/123#forum_post_456), but not headings or
+// random text selected by ::target-text.
+// Use !important to override even table row backgrounds.
+:target[id]:not(h1, h2, h3, h4, h5, h6) {
+  background-color: var(--target-background) !important;
+}
+
+// Add a focus ring around links and <input> elements when they are focused by the keyboard.
+:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: -2px; // Make sure the outline isn't clipped by overflow:hidden parents.
+  border-color: transparent;
+}
+
+menu {
+  > li {
+    display: inline;
+  }
+}
+
+p {
+  margin-bottom: 1em;
+}
+
+details {
+  summary {
+    cursor: pointer;
+    user-select: none;
+    outline: none;
+  }
+}
+
+.fineprint, %fineprint {
+  color: var(--muted-text-color);
+  font-style: italic;
+  font-size: 0.8em;
+}
+
+a.link-plain {
+  color: unset;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.fixed-width-container {
+  max-width: 60rem;
+}
+
+ul.list-bulleted {
+  list-style: inside disc;
+}
+
+ul.list-inline {
+  &, li {
+    display: inline;
+  }
+}
+
+.fit-width {
+  max-width: 100%;
+  height: auto !important;
+}
+
+.fit-height {
+  max-height: 90vh;
+  height: auto !important;
+}
+
+.svg-icon {
+  display: inline-block;
+  height: 1em;
+}
+
+.mobile-only {
+  display: none !important;
+
+  @media (width <= 660px) { display: initial !important; }
+}
+
+.desktop-only {
+  @media (width <= 660px) { display: none !important; }
+}

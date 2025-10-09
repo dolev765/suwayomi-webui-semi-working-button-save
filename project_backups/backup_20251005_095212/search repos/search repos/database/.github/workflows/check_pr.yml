@@ -1,0 +1,38 @@
+name: check_pr
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  check_pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      - name: Download tool
+        run: ./scripts/init.sh
+
+      - name: Build
+        run: node --enable-source-maps tool create-release --strict . ./publish
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database
+          path: |
+            ./publish
+            ./database
+
+      - name: Check for uncommitted changes
+        # Ensure no changes
+        run: |
+          git add .
+          if ! git diff --color=always --cached --exit-code; then
+            echo ""
+            echo "::error::更改包含非标准的条目，请按上述输出将红色行内容修改为对应绿色行内容。"
+            exit 1
+          fi

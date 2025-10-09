@@ -1,0 +1,103 @@
+name: build
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - database/*
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      - name: Download tool
+        run: ./scripts/init.sh
+
+      - name: Build
+        run: node --enable-source-maps tool create-release . ./publish
+
+      ## prepare releases
+      - name: Commit release mirror
+        run: >
+          cd ./publish
+          && (printf '${{ github.sha }}' > ./sha)
+          && git init
+          && git config user.email '66814738+ehtagtranslation[bot]@users.noreply.github.com'
+          && git config user.name  'ehtagtranslation[bot]'
+          && git add .
+          && git commit -am 'Release for https://github.com/${{ github.repository }}/commit/${{ github.sha }}'
+          && echo "MIRROR_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+      - name: Set release note
+        run: node --enable-source-maps tool github-actions set-release-note --mirror-sha '${{ env.MIRROR_SHA }}'
+
+      # publish releases
+      - name: Check latest
+        run: |
+          LATEST_SHA=$(git ls-remote origin master | cut -f1)
+          echo "Current commit: ${{ github.sha }}"
+          echo "Latest commit: $LATEST_SHA"
+          if [[ "$LATEST_SHA" != "${{ github.sha }}" ]]; then
+            echo "::warning::已经有新的版本提交，取消发布"
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+      - name: Push release mirror branch
+        uses: ad-m/github-push-action@master
+        if: ${{ !env.SKIP }}
+        with:
+          force: true
+          directory: ./publish
+          repository: ${{ github.repository }}
+          branch: release
+      - name: Upload release
+        uses: ncipollo/release-action@v1.20.0
+        if: ${{ !env.SKIP }}
+        with:
+          artifacts: ./publish/*
+          name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_BODY }}
+          commit: ${{ github.sha }}
+          tag: ${{ format('v7.{0}.{1}', github.run_number, github.run_attempt) }}
+      - name: Clean releases
+        if: ${{ !env.SKIP }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --enable-source-maps tool github-actions delete-releases
+
+  mirror:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'EhTagTranslation/Database' }}
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: release
+          persist-credentials: false
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_KEY }}
+          repositories: DatabaseReleases
+      - name: Push release mirror repo
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          force: true
+          repository: EhTagTranslation/DatabaseReleases
+          branch: master

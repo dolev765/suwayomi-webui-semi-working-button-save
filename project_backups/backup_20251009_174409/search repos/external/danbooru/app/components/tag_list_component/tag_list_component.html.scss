@@ -1,0 +1,17 @@
+.tag-list {
+  a.search-tag {
+    overflow-wrap: anywhere;
+  }
+
+  &.inline-tag-list {
+    display: inline;
+
+    a {
+      margin-right: 0.5em;
+    }
+  }
+
+  ul {
+    margin-bottom: 1em;
+  }
+}
