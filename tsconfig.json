@@ -35,7 +35,7 @@
   "include": [
     "src"
   ],
-  "exclude": ["**/node_modules"],
+  "exclude": ["**/node_modules", "**/project_backups"],
   "references": [
     {
       "path": "./tsconfig.node.json"
