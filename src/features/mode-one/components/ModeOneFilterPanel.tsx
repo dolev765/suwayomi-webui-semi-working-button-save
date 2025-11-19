@@ -1,3 +1,11 @@
+/*
+ * Copyright (C) Contributors to the Suwayomi project
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 import {
     AggregatedFilter,
     AggregatedFilterOption,
@@ -8,7 +16,20 @@ import {
     ModeOneSourceKey,
     TAG_FILTER_LABEL_PATTERN,
 } from '@/features/mode-one/ModeOne.types.ts';
-import { ensureDatabaseReady, getAllTagsByCategory, resolveAliasSync, searchCustomTags } from '@/features/mode-one/services/tagDatabaseSQL.ts';
+import { parseTagValue } from '@/features/mode-one/screens/mode-one/filterUtils.ts';
+import {
+    ensureDatabaseReady,
+    getRecommendedTags,
+    searchCustomTags,
+    type TagSearchResult
+} from '@/features/mode-one/services/tagDatabaseSQL.ts';
+import {
+    getTagSuggestions,
+    initializeTagSynonyms,
+    planTagSelection,
+    subscribeToTagGraph,
+    TagSuggestion,
+} from '@/features/mode-one/services/tagSynonyms.ts';
 import { TriState } from '@/lib/graphql/generated/graphql.ts';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
@@ -21,27 +42,22 @@ import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
+import CircularProgress from '@mui/material/CircularProgress';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
-import FormControl from '@mui/material/FormControl';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import InputAdornment from '@mui/material/InputAdornment';
 import Stack from '@mui/material/Stack';
 import { alpha, keyframes, styled } from '@mui/material/styles';
+import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
-import * as fuzzySearch from 'fuzzy-search';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-
-// Global cache shared across ALL TextFilterControl instances - persists across remounts
-// This avoids reloading tags every time a component mounts or the dropdown opens
-const globalTagsCache = new Map<'male' | 'female' | 'all', Array<{ label: string; category?: 'male' | 'female' }>>();
-const globalSearcherCache = new Map<'male' | 'female' | 'all', fuzzySearch.Searcher>();
-const globalTagsLoaded = new Map<'male' | 'female' | 'all', boolean>();
 
 // HentaiHere-inspired color scheme
 const SUPPORT_COLORS = ['#5f6368', '#ea4c89', '#f082ac', '#ff4590', '#c369ff'];
@@ -49,11 +65,62 @@ const SUPPORT_COLORS = ['#5f6368', '#ea4c89', '#f082ac', '#ff4590', '#c369ff'];
 // Common filters that should appear in the main section
 // Filter keys have format: "type:labelinlowercase"
 const COMMON_FILTER_KEYS = [
-    'select:sort',           // Sort by
-    'select:order',          // Order (ascending/descending)
-    'select:rating',         // Minimum rating
+    'select:sort', // Sort by
+    'select:order', // Order (ascending/descending)
+    'select:rating', // Minimum rating
     'select:tag search mode', // Tag search mode
 ];
+
+const normalizeForMatch = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ');
+
+const TAG_SOURCE_VALUE_PRIORITY: ModeOneSourceKey[] = ['hitomi', 'hentai2read', 'ehentai', 'hentaifox'];
+const KNOWN_TAG_CATEGORIES = [
+    'male',
+    'female',
+    'tag',
+    'artist',
+    'group',
+    'character',
+    'language',
+    'parody',
+    'series',
+    'type',
+    'cosplayer',
+    'mixed',
+    'other',
+    'reclass',
+];
+const DEFAULT_TAG_CATEGORY = 'tag';
+const CATEGORY_PRIORITY = [
+    'tag',
+    'female',
+    'male',
+    'group',
+    'artist',
+    'character',
+    'parody',
+    'language',
+    'series',
+    'type',
+    'cosplayer',
+    'mixed',
+    'other',
+    'reclass',
+];
+
+const normalizeCategory = (value: string | undefined): string | undefined => {
+    if (!value) {
+        return undefined;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+        return undefined;
+    }
+    if (KNOWN_TAG_CATEGORIES.includes(normalized)) {
+        return normalized;
+    }
+    return undefined;
+};
 
 // Check if a filter is a female/male tag filter (these go in common)
 const isGenderTagFilter = (filterLabel: string) => {
@@ -84,11 +151,7 @@ const levenshteinDistance = (a: string, b: string): number => {
     for (let i = 1; i <= a.length; i += 1) {
         for (let j = 1; j <= b.length; j += 1) {
             const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-            matrix[i][j] = Math.min(
-                matrix[i - 1][j] + 1,
-                matrix[i][j - 1] + 1,
-                matrix[i - 1][j - 1] + cost,
-            );
+            matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost);
         }
     }
 
@@ -106,12 +169,14 @@ type TagSearchEntryInternal = {
     normalizedKeys: Set<string>;
     perSourceValues: Map<ModeOneSourceKey, string>;
     filterOptionRefs: Map<string, string>;
+    categories: Set<string>;
 };
 
 type TagSearchOption = OptionWithNormalizedKeys & {
     sources: ModeOneSourceKey[];
     perSourceValues: Partial<Record<ModeOneSourceKey, string>>;
     filterOptionRefs: Record<string, string>;
+    categories: string[];
     entry: TagSearchEntryInternal;
 };
 
@@ -261,98 +326,17 @@ const buildSupportLabel = (count: number): string => {
     return 'None';
 };
 
-const normalizeForMatch = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ');
-
-// Custom tag synonym mappings to prioritize over fuzzy matching
-const CUSTOM_TAG_SYNONYMS: Record<string, string> = {
-    // Paizuri variations
-    'titfuck': 'paizuri',
-    'tit fuck': 'paizuri',
-    'titjob': 'paizuri',
-    'tit job': 'paizuri',
-    'breast sex': 'paizuri',
-    'breastfuck': 'paizuri',
-    'breast fuck': 'paizuri',
-    // Fellatio variations
-    'blowjob': 'fellatio',
-    'blow job': 'fellatio',
-    'bj': 'fellatio',
-    // Footjob variations  
-    'foot job': 'footjob',
-    'foot sex': 'footjob',
-    // Common misspellings and variations
-    'ahegayo': 'ahegao',
-    'oface': 'ahegao',
-    'o-face': 'ahegao',
-    'creampie': 'nakadashi',
-    'internal cumshot': 'nakadashi',
-    'ntr': 'netorare',
-    'cuckolding': 'netorare',
-    'cuckold': 'netorare',
-    'futa': 'futanari',
-    'loli': 'lolicon',
-    'shota': 'shotacon',
-};
-
-// Hook to get SQL database search results for a query
-const useSqlDatabaseSearch = (query: string, isTagFilter: boolean) => {
-    const [sqlResults, setSqlResults] = useState<Array<{
-        canonical: string;
-        aliases: string[];
-        category: 'male' | 'female';
-        score: number;
-    }>>([]);
-
-    useEffect(() => {
-        if (!isTagFilter || !query || query.length < 2) {
-            setSqlResults([]);
-            return;
-        }
-
-        const normalized = normalizeForMatch(query);
-        if (!normalized) {
-            setSqlResults([]);
-            return;
-        }
-
-        const timeoutId = setTimeout(() => {
-            void (async () => {
-                try {
-                    const isReady = await ensureDatabaseReady();
-                    if (!isReady) {
-                        setSqlResults([]);
-                        return;
-                    }
-
-                    const results = searchCustomTags(query, {
-                        limit: 15,
-                        minScore: 20
-                    });
-
-                    const simplified = results
-                        .sort((a, b) => b.score - a.score)
-                        .map(r => ({
-                            canonical: r.canonical,
-                            aliases: r.aliases || [],
-                            category: r.category,
-                            score: r.score,
-                        }));
-                    setSqlResults(simplified);
-                } catch (error) {
-                    setSqlResults([]);
-                }
-            })();
-        }, 200);
-
-        return () => clearTimeout(timeoutId);
-    }, [query, isTagFilter]);
-
-    return sqlResults;
+const registerNormalizedKey = (value: string, target: Set<string>) => {
+    const normalized = normalizeForMatch(value);
+    if (!normalized) {
+        return;
+    }
+    target.add(normalized);
+    target.add(normalized.replace(/\s+/g, ''));
 };
 
 const SelectFilterControl = ({
     filterKey,
-    label,
     options,
     selectedValue,
     supportedSources,
@@ -361,7 +345,6 @@ const SelectFilterControl = ({
     hintResolver,
 }: {
     filterKey: string;
-    label: string;
     options: AggregatedFilterOption[];
     selectedValue?: string;
     supportedSources: ModeOneSourceKey[];
@@ -371,12 +354,6 @@ const SelectFilterControl = ({
 }) => {
     const [inputValue, setInputValue] = useState('');
     const [isBurstVisible, setIsBurstVisible] = useState(false);
-
-    // Check if this is a tag filter
-    const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(label);
-
-    // Get SQL database results for tag filters
-    const sqlResults = useSqlDatabaseSearch(inputValue, isTagFilter);
 
     const selectedOption = useMemo(
         () => options.find((option) => option.key === selectedValue),
@@ -397,7 +374,7 @@ const SelectFilterControl = ({
 
     useEffect(() => {
         if (!isBurstVisible) {
-            return;
+            return undefined;
         }
         const timeout = setTimeout(() => setIsBurstVisible(false), 480);
         return () => clearTimeout(timeout);
@@ -411,52 +388,11 @@ const SelectFilterControl = ({
                 onSelectionChange(filterKey, null);
                 setIsBurstVisible(false);
                 setInputValue('');
-                return;
+                return undefined;
             }
 
-            // First try exact match
             const exactMatch = options.find((option) => option.normalizedKeys?.includes(normalized));
-
-            // If no exact match, check custom synonyms before fuzzy matching
-            let chosen = exactMatch;
-            if (!chosen) {
-                const customSynonym = CUSTOM_TAG_SYNONYMS[normalized];
-                if (customSynonym) {
-                    // Try to find the target tag
-                    chosen = options.find((option) =>
-                        option.normalizedKeys?.includes(customSynonym.toLowerCase())
-                    );
-                }
-            }
-
-            // For tag filters, try SQL database results
-            if (!chosen && isTagFilter && sqlResults.length > 0) {
-                for (const sqlResult of sqlResults) {
-                    // Try canonical name
-                    const canonicalLower = sqlResult.canonical.toLowerCase();
-                    chosen = options.find(opt =>
-                        opt.normalizedKeys?.includes(canonicalLower) ||
-                        opt.label.toLowerCase() === canonicalLower
-                    );
-                    if (chosen) break;
-
-                    // Try aliases
-                    for (const alias of sqlResult.aliases) {
-                        const aliasLower = alias.toLowerCase();
-                        chosen = options.find(opt =>
-                            opt.normalizedKeys?.includes(aliasLower) ||
-                            opt.label.toLowerCase() === aliasLower
-                        );
-                        if (chosen) break;
-                    }
-                    if (chosen) break;
-                }
-            }
-
-            // Fall back to fuzzy matching only if no exact or synonym match
-            if (!chosen) {
-                chosen = findClosestOption(normalized, options);
-            }
+            const chosen = exactMatch ?? findClosestOption(normalized, options);
 
             if (chosen) {
                 setInputValue(chosen.label);
@@ -466,19 +402,31 @@ const SelectFilterControl = ({
                 onSelectionChange(filterKey, null);
                 setIsBurstVisible(false);
             }
+            return undefined;
         },
         [filterKey, onSelectionChange, options],
     );
 
-    const previewValues = useMemo(() => options.map((option) => option.label).slice(0, 6).join(', '), [options]);
+    const previewValues = useMemo(
+        () =>
+            options
+                .map((option) => option.label)
+                .slice(0, 6)
+                .join(', '),
+        [options],
+    );
     const moreCount = Math.max(0, options.length - 6);
 
     const hintText = options.length ? hintResolver(previewValues, moreCount) : '';
 
     return (
         <Stack spacing={1}>
+            <SourcesCaption supportedSources={supportedSources} />
             <TextFieldWrapper supportColor={supportColor} isPulsing={isBurstVisible}>
-                <Autocomplete
+                <SupportBurst supportcolor={supportColor} visible={isBurstVisible}>
+                    {supportLabel}
+                </SupportBurst>
+                <Autocomplete<TagSuggestion, false, false, false>
                     freeSolo
                     options={options}
                     value={selectedOption ?? null}
@@ -509,94 +457,43 @@ const SelectFilterControl = ({
                             commitValue(inputValue);
                         }
                     }}
-                    getOptionLabel={(option) => typeof option === 'string' ? option : option.label}
-                    filterOptions={(options, { inputValue: filterInput }) => {
+                    getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
+                    filterOptions={(availableOptions, { inputValue: filterInput }) => {
                         if (!filterInput) {
-                            return options;
+                            return availableOptions;
                         }
 
                         const normalized = normalizeForMatch(filterInput);
-                        const allOptions = [...options];
-
-                        // For tag filters, integrate SQL database results
-                        if (isTagFilter && sqlResults.length > 0) {
-                            // Create virtual options from SQL database results that aren't already in options
-                            const existingLabels = new Set(options.map(opt => opt.label.toLowerCase()));
-
-                            sqlResults.forEach((sqlResult) => {
-                                // Check if canonical or any alias matches existing options
-                                const canonicalLower = sqlResult.canonical.toLowerCase();
-                                const hasMatch = existingLabels.has(canonicalLower) ||
-                                    sqlResult.aliases.some(alias => existingLabels.has(alias.toLowerCase()));
-
-                                if (!hasMatch) {
-                                    // Try to find a similar option in the existing options
-                                    const similarOption = options.find(opt => {
-                                        const optLower = opt.label.toLowerCase();
-                                        return optLower === canonicalLower ||
-                                            optLower.includes(normalized) ||
-                                            canonicalLower.includes(optLower);
-                                    });
-
-                                    if (!similarOption) {
-                                        // Add as a virtual option (will be matched by fuzzy search)
-                                        // We'll boost these in the scoring below
-                                    }
-                                }
-                            });
-                        }
-
-                        // Check for custom synonyms
-                        const customSynonym = CUSTOM_TAG_SYNONYMS[normalized];
-                        const searchTerms = customSynonym
-                            ? [normalized, customSynonym.toLowerCase()]
-                            : [normalized];
+                        const searchTerms = [normalized];
 
                         // Prioritize exact and fuzzy matches
-                        const exactMatches = allOptions.filter((option) =>
-                            searchTerms.some(term =>
-                                option.normalizedKeys?.includes(term) ||
-                                option.label.toLowerCase() === term
-                            )
+                        const exactMatches = availableOptions.filter((option) =>
+                            searchTerms.some(
+                                (term) => option.normalizedKeys?.includes(term) || option.label.toLowerCase() === term,
+                            ),
                         );
 
                         if (exactMatches.length > 0) {
                             return exactMatches;
                         }
 
-                        // Enhanced fuzzy matching with SQL database boost
-                        const scored = allOptions.map((option) => {
+                        // Fuzzy matching for top results
+                        const scored = availableOptions.map((option) => {
                             const candidates = option.normalizedKeys?.length
                                 ? option.normalizedKeys
                                 : [option.label.toLowerCase()];
 
-                            let bestScore = Math.min(
-                                ...searchTerms.flatMap(term =>
-                                    candidates.map(candidate =>
-                                        levenshteinDistance(term, candidate)
-                                    )
-                                )
+                            const bestScore = Math.min(
+                                ...searchTerms.flatMap((term) =>
+                                    candidates.map((candidate) => levenshteinDistance(term, candidate)),
+                                ),
                             );
-
-                            // Boost score if option matches SQL database results
-                            if (isTagFilter && sqlResults.length > 0) {
-                                const optionLower = option.label.toLowerCase();
-                                const sqlMatch = sqlResults.find(r =>
-                                    r.canonical.toLowerCase() === optionLower ||
-                                    r.aliases.some(a => a.toLowerCase() === optionLower)
-                                );
-
-                                if (sqlMatch) {
-                                    // Boost by reducing score (lower is better)
-                                    bestScore = Math.max(0, bestScore - (sqlMatch.score / 100));
-                                }
-                            }
 
                             return { option, score: bestScore };
                         });
 
                         scored.sort((a, b) => a.score - b.score);
-                        return scored.slice(0, 25).map(s => s.option);
+                        return scored.slice(0, 20).map((s) => s.option);
                     }}
                     renderInput={(params) => (
                         <TextField
@@ -607,20 +504,15 @@ const SelectFilterControl = ({
                                 '& .MuiInput-root': {
                                     color: '#fff',
                                     fontSize: '0.95rem',
-                                    transition: 'all 0.3s ease',
                                 },
                                 '& .MuiInput-root:before': {
-                                    borderBottomColor: alpha(supportColor, 0.3),
-                                    borderBottomWidth: '1.5px',
+                                    borderBottomColor: alpha(supportColor, 0.25),
                                 },
                                 '& .MuiInput-root:hover:not(.Mui-disabled):before': {
-                                    borderBottomColor: alpha(supportColor, 0.6),
-                                    borderBottomWidth: '2px',
+                                    borderBottomColor: alpha(supportColor, 0.5),
                                 },
                                 '& .MuiInput-root.Mui-focused:after': {
                                     borderBottomColor: supportColor,
-                                    borderBottomWidth: '2.5px',
-                                    boxShadow: `0 2px 8px ${alpha(supportColor, 0.4)}`,
                                 },
                             }}
                         />
@@ -633,14 +525,6 @@ const SelectFilterControl = ({
                                 backgroundColor: '#1a1a1a',
                                 color: '#fff',
                                 borderBottom: `1px solid ${alpha('#ea4c89', 0.1)}`,
-                                transition: 'all 0.2s ease',
-                                cursor: 'pointer',
-                            }}
-                            onMouseEnter={(e) => {
-                                e.currentTarget.style.backgroundColor = alpha('#ea4c89', 0.15).toString();
-                            }}
-                            onMouseLeave={(e) => {
-                                e.currentTarget.style.backgroundColor = '#1a1a1a';
                             }}
                         >
                             <Typography variant="body2">{option.label}</Typography>
@@ -651,24 +535,21 @@ const SelectFilterControl = ({
                     componentsProps={{
                         paper: {
                             sx: {
-                                background: `linear-gradient(135deg, ${alpha('#1a1a1a', 0.98)}, ${alpha('#2a1a2a', 0.98)})`,
+                                backgroundColor: '#1a1a1a',
                                 backgroundImage: 'none',
-                                border: `1.5px solid ${alpha('#ea4c89', 0.3)}`,
-                                borderRadius: 2,
-                                boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.25)}, inset 0 1px 0 ${alpha('#fff', 0.05)}`,
+                                border: `1px solid ${alpha('#ea4c89', 0.3)}`,
+                                boxShadow: `0 4px 20px ${alpha('#ea4c89', 0.2)}`,
                                 '& .MuiAutocomplete-listbox': {
                                     padding: 0,
                                     '& .MuiAutocomplete-option': {
                                         color: '#fff',
-                                        transition: 'all 0.2s ease',
                                         '&:hover, &.Mui-focused': {
-                                            background: `linear-gradient(90deg, ${alpha('#ea4c89', 0.2)}, ${alpha('#f082ac', 0.15)})`,
-                                            transform: 'translateX(2px)',
+                                            backgroundColor: alpha('#ea4c89', 0.15),
                                         },
                                         '&[aria-selected="true"]': {
-                                            background: `linear-gradient(90deg, ${alpha('#ea4c89', 0.3)}, ${alpha('#f082ac', 0.25)})`,
+                                            backgroundColor: alpha('#ea4c89', 0.25),
                                             '&:hover, &.Mui-focused': {
-                                                background: `linear-gradient(90deg, ${alpha('#ea4c89', 0.35)}, ${alpha('#f082ac', 0.3)})`,
+                                                backgroundColor: alpha('#ea4c89', 0.35),
                                             },
                                         },
                                     },
@@ -686,6 +567,7 @@ const SelectFilterControl = ({
                         },
                     }}
                 />
+                <SupportIndicator supportcolor={supportColor}>{supportLabel}</SupportIndicator>
             </TextFieldWrapper>
             {!!hintText && (
                 <Typography variant="caption" color="text.secondary">
@@ -696,599 +578,524 @@ const SelectFilterControl = ({
     );
 };
 
+const resolveOptionForTerm = (
+    term: string,
+    tagIndex: Map<string, TagSearchEntryInternal>,
+    tagOptionLookup: Map<TagSearchEntryInternal, TagSearchOption>,
+    tagOptions: TagSearchOption[],
+) => {
+    const normalized = normalizeForMatch(term);
+    const directEntry = tagIndex.get(normalized);
+    if (directEntry) {
+        const option = tagOptionLookup.get(directEntry);
+        if (option) {
+            return option;
+        }
+    }
+
+    return tagOptions.find(
+        (option) => option.normalizedKeys?.includes(normalized) || option.label.toLowerCase() === normalized,
+    );
+};
+
+const pickTagValueForFilter = (
+    filterLabel: string | undefined,
+    term: string,
+    aliases: string[],
+    preferredBase?: string,
+): string => {
+    const toPlain = (value?: string): string | undefined => {
+        if (!value) {
+            return undefined;
+        }
+        const trimmed = value.trim();
+        const parts = trimmed
+            .split(':')
+            .map((part) => part.trim())
+            .filter(Boolean);
+        if (!parts.length) {
+            return undefined;
+        }
+        return parts[parts.length - 1];
+    };
+
+    const plainCandidates = Array.from(
+        new Set(
+            [preferredBase, term, ...aliases]
+                .map((candidate) => toPlain(candidate))
+                .filter((candidate): candidate is string => !!candidate),
+        ),
+    );
+
+    const basePlain = toPlain(preferredBase ?? term);
+    const normalizedBasePlain = basePlain ? normalizeForMatch(basePlain) : undefined;
+
+    const pickPreferredPlain = () => {
+        if (normalizedBasePlain) {
+            const match = plainCandidates.find((candidate) => normalizeForMatch(candidate) === normalizedBasePlain);
+            if (match) {
+                return match;
+            }
+        }
+        return plainCandidates[0] ?? basePlain ?? term;
+    };
+
+    return pickPreferredPlain();
+};
+
+const canonicalizeTagValue = (value?: string): string => parseTagValue(value).base;
+
+const getTagCategoryFromLabel = (label: string): string | undefined => {
+    const normalized = label.toLowerCase();
+    if (normalized.includes('search')) {
+        return undefined;
+    }
+    if (normalized.includes('female')) {
+        return 'female';
+    }
+    if (normalized.includes('male')) {
+        return 'male';
+    }
+    if (normalized.includes('artist')) {
+        return 'artist';
+    }
+    if (normalized.includes('group')) {
+        return 'group';
+    }
+    if (normalized.includes('character')) {
+        return 'character';
+    }
+    if (normalized.includes('language')) {
+        return 'language';
+    }
+    if (normalized.includes('parody')) {
+        return 'parody';
+    }
+    if (normalized.includes('series')) {
+        return 'series';
+    }
+    if (normalized.includes('type')) {
+        return 'type';
+    }
+    if (normalized.includes('content')) {
+        return 'tag';
+    }
+    if (normalized.includes('tag')) {
+        return 'tag';
+    }
+    return undefined;
+};
+
+const getTagCategoryFromValue = (value: string): string | undefined => {
+    if (!value) {
+        return undefined;
+    }
+    const match = value
+        .trim()
+        .toLowerCase()
+        .match(/^([a-z]+)\s*[:-]/);
+    if (!match) {
+        return undefined;
+    }
+    return normalizeCategory(match[1]);
+};
+
+const getCategoryPriorityIndex = (category: string): number => {
+    const normalized = normalizeCategory(category) ?? category;
+    const index = CATEGORY_PRIORITY.indexOf(normalized);
+    return index === -1 ? CATEGORY_PRIORITY.length : index;
+};
+
+const buildTagValueForLabel = (
+    label: string,
+    baseTag: string,
+    sources?: ModeOneSourceKey | ModeOneSourceKey[],
+): string => {
+    const canonicalBase = canonicalizeTagValue(baseTag);
+    if (!canonicalBase) {
+        return '';
+    }
+    const prefix = getTagCategoryFromLabel(label);
+    if (!prefix) {
+        return canonicalBase;
+    }
+    let sourceList: ModeOneSourceKey[] = [];
+    if (Array.isArray(sources)) {
+        sourceList = sources;
+    } else if (sources) {
+        sourceList = [sources];
+    }
+    if (prefix === 'tag') {
+        const requiresTagPrefix = sourceList.some((source) => source === 'hitomi' || source === 'hentai2read');
+        if (!requiresTagPrefix) {
+            return canonicalBase;
+        }
+    }
+    return `${prefix}:${canonicalBase}`;
+};
+
+const pickPreferredPerSourceValue = (option: TagSearchOption, sources: ModeOneSourceKey[]): string | undefined => {
+    if (!sources.length) {
+        return undefined;
+    }
+
+    const relevantSet = new Set(sources);
+    const prioritized = TAG_SOURCE_VALUE_PRIORITY.filter((source) => relevantSet.has(source));
+    const orderedSources = [...prioritized, ...sources.filter((source) => !prioritized.includes(source))];
+
+    let firstCandidate: string | undefined;
+    for (const source of orderedSources) {
+        const candidate = option.perSourceValues?.[source];
+        if (candidate) {
+            const canonical = canonicalizeTagValue(candidate);
+            if (canonical) {
+                if (!firstCandidate) {
+                    firstCandidate = canonical;
+                }
+                return canonical;
+            }
+        }
+    }
+
+    return firstCandidate;
+};
+
+const formatCategoryLabel = (category: string): string => {
+    switch (category) {
+        case 'male':
+            return 'Male';
+        case 'female':
+            return 'Female';
+        case 'tag':
+            return 'Tag';
+        case 'artist':
+            return 'Artist';
+        case 'group':
+            return 'Group';
+        case 'character':
+            return 'Character';
+        case 'language':
+            return 'Language';
+        case 'parody':
+            return 'Parody';
+        case 'series':
+            return 'Series';
+        case 'type':
+            return 'Type';
+        case 'cosplayer':
+            return 'Cosplayer';
+        case 'mixed':
+            return 'Mixed';
+        case 'other':
+            return 'Other';
+        case 'reclass':
+            return 'Reclass';
+        default:
+            return category;
+    }
+};
+
+const getOptionCategories = (option: TagSearchOption): string[] =>
+    option.categories.map((category) => formatCategoryLabel(category)).filter(Boolean);
+
 const TextFilterControl = ({
     filterKey,
+    filterLabel,
     value,
     supportedSources,
     onSelectionChange,
     placeholder,
-    label,
-    onDisplayValueChange,
 }: {
     filterKey: string;
+    filterLabel: string;
     value: string;
     supportedSources: ModeOneSourceKey[];
     onSelectionChange: SelectionHandler;
     placeholder: string;
-    label?: string;
-    onDisplayValueChange?: (filterKey: string, displayValue: string | null) => void;
 }) => {
-    // Use ref to store onDisplayValueChange to avoid dependency array issues
-    // Initialize with the current value, but always keep the ref (even if undefined)
-    const onDisplayValueChangeRef = useRef(onDisplayValueChange);
-    // Update ref when callback changes - use a stable dependency array
-    useEffect(() => {
-        onDisplayValueChangeRef.current = onDisplayValueChange;
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [onDisplayValueChange]); // onDisplayValueChange can be undefined, but array size is always 1
-
-    // Use ref to track current value to avoid stale closure issues
-    const currentValueRef = useRef(value);
-    useEffect(() => {
-        currentValueRef.current = value;
-    }, [value]);
-
+    const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filterLabel) || isGenderTagFilter(filterLabel);
     const supportColor = getSupportColor(supportedSources.length);
     const supportLabel = buildSupportLabel(supportedSources.length);
     const [isBurstVisible, setIsBurstVisible] = useState(false);
-    // For tag filters, keep display value (what user typed) separate from filter value (canonical)
-    const [displayValue, setDisplayValue] = useState(value);
     const [inputValue, setInputValue] = useState(value);
-    const [suggestions, setSuggestions] = useState<Array<{ label: string; category?: 'male' | 'female' }>>([]);
-    const [isOpen, setIsOpen] = useState(false);
 
-    // Check if this is a tag filter
-    const isTagFilter = label ? TAG_FILTER_LABEL_PATTERN.test(label) : false;
-    const category = label?.toLowerCase().includes('female') ? 'female' : label?.toLowerCase().includes('male') ? 'male' : undefined;
+    // Async search state
+    const [options, setOptions] = useState<TagSearchResult[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [open, setOpen] = useState(false);
 
-    const [tagsLoaded, setTagsLoaded] = useState(false);
+    const valueRef = useRef(value);
+    const shouldSkipSyncRef = useRef(false);
+    const searchTimeoutRef = useRef<NodeJS.Timeout>();
 
-    // Load all database tags once when dropdown opens (lazy load, but cache globally)
-    // This avoids loading tags on every component mount
+    // Determine category from filter label
+    const tagCategory = useMemo(() => {
+        const label = filterLabel.toLowerCase();
+        if (label.includes('female')) return 'female' as const;
+        if (label.includes('male')) return 'male' as const;
+        return undefined;
+    }, [filterLabel]);
+
+    // Sync inputValue with value prop
     useEffect(() => {
-        if (!isTagFilter || !isOpen || tagsLoaded) {
+        if (shouldSkipSyncRef.current) {
+            shouldSkipSyncRef.current = false;
             return;
         }
-
-        // Check if tags are already cached globally (across all instances)
-        const cacheKey = category || 'all';
-        if (globalTagsCache.has(cacheKey) && globalTagsCache.get(cacheKey)!.length > 0) {
-            // Tags already loaded globally, just mark as loaded for this instance
-            setTagsLoaded(true);
-            return;
-        }
-
-        void (async () => {
-            try {
-                // Quick check - if database is already initialized, skip the async wait
-                const { isDatabaseReady } = await import('@/features/mode-one/services/tagDatabaseSQL.ts');
-                if (isDatabaseReady()) {
-                    // Database is ready, load tags synchronously (fast!)
-                    // Filter by category: female tags only for female filter, male tags only for male filter
-                    const results = getAllTagsByCategory(category);
-
-                    const allTags = results.flatMap(r => [
-                        { label: r.canonical, category: r.category },
-                        ...r.aliases.map(alias => ({ label: alias, category: r.category }))
-                    ]);
-
-                    // Filter by category - only show tags matching the filter's category
-                    const filteredByCategory = category
-                        ? allTags.filter(tag => tag.category === category)
-                        : allTags;
-
-                    // Add AI tag to both female and male sections
-                    const aiTag = { label: 'ai', category: category as 'male' | 'female' | undefined };
-                    if (category) {
-                        filteredByCategory.push(aiTag);
-                    }
-
-                    // Remove duplicates
-                    const uniqueTags = Array.from(
-                        new Map(filteredByCategory.map(tag => [tag.label.toLowerCase(), tag])).values()
-                    );
-
-                    // Cache tags globally (shared across all instances)
-                    globalTagsCache.set(cacheKey, uniqueTags);
-
-                    // Create and cache fuzzy search searcher globally - only once!
-                    const config = fuzzySearch.Config.createDefaultConfig();
-                    const searcher = fuzzySearch.SearcherFactory.createSearcher(config);
-                    // Index with both original label and space-normalized version for better matching
-                    searcher.indexEntities(
-                        uniqueTags,
-                        (tag, index) => `${tag.label}-${index}`,
-                        (tag) => [
-                            tag.label, // Original with spaces
-                            tag.label.replace(/\s+/g, ''), // Without spaces (for "boobjob" -> "boob job")
-                            tag.label.replace(/\s+/g, ' '), // Normalized spaces
-                        ]
-                    );
-                    globalSearcherCache.set(cacheKey, searcher);
-                    globalTagsLoaded.set(cacheKey, true);
-
-                    setTagsLoaded(true);
-                } else {
-                    // Database not ready, ensure it's ready (this might be slow the first time)
-                    const isReady = await ensureDatabaseReady();
-                    if (!isReady) {
-                        return;
-                    }
-
-                    // Now load tags
-                    // Filter by category: female tags only for female filter, male tags only for male filter
-                    const results = getAllTagsByCategory(category);
-
-                    const allTags = results.flatMap(r => [
-                        { label: r.canonical, category: r.category },
-                        ...r.aliases.map(alias => ({ label: alias, category: r.category }))
-                    ]);
-
-                    // Filter by category - only show tags matching the filter's category
-                    const filteredByCategory = category
-                        ? allTags.filter(tag => tag.category === category)
-                        : allTags;
-
-                    // Add AI tag to both female and male sections
-                    const aiTag = { label: 'ai', category: category as 'male' | 'female' | undefined };
-                    if (category) {
-                        filteredByCategory.push(aiTag);
-                    }
-
-                    const uniqueTags = Array.from(
-                        new Map(filteredByCategory.map(tag => [tag.label.toLowerCase(), tag])).values()
-                    );
-
-                    globalTagsCache.set(cacheKey, uniqueTags);
-
-                    const config = fuzzySearch.Config.createDefaultConfig();
-                    const searcher = fuzzySearch.SearcherFactory.createSearcher(config);
-                    searcher.indexEntities(
-                        uniqueTags,
-                        (tag, index) => `${tag.label}-${index}`,
-                        (tag) => [
-                            tag.label,
-                            tag.label.replace(/\s+/g, ''),
-                            tag.label.replace(/\s+/g, ' '),
-                        ]
-                    );
-                    globalSearcherCache.set(cacheKey, searcher);
-                    globalTagsLoaded.set(cacheKey, true);
-
-                    setTagsLoaded(true);
-                }
-            } catch (error) {
-                // Silently fail
-            }
-        })();
-    }, [isTagFilter, category, tagsLoaded, isOpen]);
-
-    // Search cached tags and create suggestions for tag filters (when typing) - debounced and simplified
-    useEffect(() => {
-        if (!isTagFilter || !inputValue || inputValue.length < 2) {
-            setSuggestions([]);
-            return;
-        }
-
-        // Debounce the search to reduce lag
-        const timeoutId = setTimeout(() => {
-            const cacheKey = category || 'all';
-            const cachedSearcher = globalSearcherCache.get(cacheKey);
-            const cachedTags = globalTagsCache.get(cacheKey) || [];
-
-            if (cachedSearcher && cachedTags.length > 0) {
-                // Filter by category first
-                const categoryFilteredTags = category
-                    ? cachedTags.filter(tag => tag.category === category)
-                    : cachedTags;
-
-                if (categoryFilteredTags.length === 0) {
-                    setSuggestions([]);
-                    return;
-                }
-
-                // Simple, fast search - just one query
-                const normalizedInput = inputValue.toLowerCase().trim().replace(/\s+/g, '');
-                const fuzzyResults = cachedSearcher.search(inputValue, 20);
-
-                // Simple deduplication and sorting, filtered by category
-                const uniqueMap = new Map<string, { label: string; category?: 'male' | 'female'; score: number }>();
-                fuzzyResults.forEach((result) => {
-                    const entity = result.entity as { label: string; category?: 'male' | 'female' };
-                    // Only include if category matches
-                    if (category && entity.category !== category) {
-                        return;
-                    }
-                    const key = entity.label.toLowerCase();
-                    const score = result.score || 0;
-                    const existing = uniqueMap.get(key);
-                    if (!existing || score > existing.score) {
-                        uniqueMap.set(key, {
-                            label: entity.label,
-                            category: entity.category,
-                            score,
-                        });
-                    }
-                });
-
-                // Quick sort and limit
-                const suggestions = Array.from(uniqueMap.values())
-                    .sort((a, b) => b.score - a.score)
-                    .slice(0, 20);
-
-                setSuggestions(suggestions);
-            }
-        }, 150); // Debounce to reduce lag
-
-        return () => clearTimeout(timeoutId);
-    }, [inputValue, isTagFilter, category]);
-
-    // Sync input value with prop value, but for tag filters preserve display value
-    useEffect(() => {
-        // Update ref when value changes
-        currentValueRef.current = value;
-
-        // Only sync if value changed externally (not from our handleChange)
-        // For tag filters, we want to keep showing what user typed, not the canonical name
-        if (!isTagFilter) {
-            setInputValue(value);
-            setDisplayValue(value);
-        } else {
-            // For tag filters, only update if value is empty (cleared externally)
-            if (!value) {
-                setInputValue('');
-                setDisplayValue('');
-                // Clear display value in parent when filter is cleared (use ref to avoid dependency)
-                if (onDisplayValueChangeRef.current) {
-                    onDisplayValueChangeRef.current(filterKey, null);
-                }
-            }
-            // Otherwise, keep the display value as what user typed (don't show comma-separated tags in input)
-        }
-    }, [value, isTagFilter, filterKey]);
+        setInputValue(value);
+        valueRef.current = value;
+    }, [value]);
 
     useEffect(() => {
         if (!value) {
             setIsBurstVisible(false);
-            return;
+            return undefined;
         }
         setIsBurstVisible(true);
         const timeout = setTimeout(() => setIsBurstVisible(false), 520);
         return () => clearTimeout(timeout);
     }, [value, supportedSources.length]);
 
-    const handleChange = useCallback((newValue: string | null) => {
-        const finalValue = newValue || '';
-        // Always update display value to show what user typed
-        setInputValue(finalValue);
-        setDisplayValue(finalValue);
+    // Debounced search function
+    const handleSearch = useCallback((query: string) => {
+        if (searchTimeoutRef.current) {
+            clearTimeout(searchTimeoutRef.current);
+        }
 
-        // For tag filters, support multiple tags (comma-separated)
-        if (isTagFilter && finalValue) {
-            // Remove any category prefix that might have been accidentally added (e.g., "female:tag" -> "tag")
-            const cleanValue = finalValue.replace(/^(?:male|female):\s*/i, '').trim();
-
-            // Try to resolve alias to canonical name (synchronous for better performance)
-            const canonical = resolveAliasSync(cleanValue);
-            // Use canonical if found, otherwise use the cleaned value
-            const valueToUse = canonical || cleanValue;
-
-            // Ensure value doesn't contain category prefix (safety check)
-            const finalValueToUse = valueToUse.replace(/^(?:male|female):\s*/i, '').trim();
-
-            // Simple, fast tag addition - get current value and append
-            const currentValue = currentValueRef.current || value || '';
-            const existingTags = currentValue ? currentValue.split(',').map(t => t.trim()).filter(Boolean) : [];
-
-            // Skip if already selected
-            if (existingTags.includes(finalValueToUse)) {
-                setDisplayValue('');
-                setInputValue('');
-                return;
-            }
-
-            // Add tag and update immediately
-            const combinedValue = existingTags.length > 0
-                ? `${currentValue},${finalValueToUse}`
-                : finalValueToUse;
-
-            // Update ref immediately
-            currentValueRef.current = combinedValue;
-
-            // Store display value (alias)
-            if (onDisplayValueChangeRef.current) {
-                onDisplayValueChangeRef.current(filterKey, cleanValue);
-            }
-
-            // Apply filter - simple and fast
-            if (typeof onSelectionChange === 'function') {
-                onSelectionChange(filterKey, {
-                    type: 'text',
-                    value: combinedValue,
-                });
-            } else {
-                console.error('[TextFilterControl] onSelectionChange is not a function:', typeof onSelectionChange);
-            }
-
+        if (!query || query.trim().length < 2) {
+            setOptions([]);
+            setLoading(false);
             return;
         }
 
-        // For non-tag filters, clear display value and use value as-is
-        if (onDisplayValueChangeRef.current) {
-            onDisplayValueChangeRef.current(filterKey, null);
+        setLoading(true);
+        searchTimeoutRef.current = setTimeout(async () => {
+            try {
+                await ensureDatabaseReady();
+                const results = searchCustomTags(query, {
+                    category: tagCategory,
+                    limit: 50,
+                    minScore: 50
+                });
+                setOptions(results);
+            } catch (error) {
+                console.error('Tag search failed:', error);
+                setOptions([]);
+            } finally {
+                setLoading(false);
+            }
+        }, 300); // 300ms debounce
+    }, [tagCategory]);
+
+    // Handle change for tag filters
+    const handleChange = useCallback((newValue: string | null, append: boolean = false, clearInput: boolean = false) => {
+        if (!newValue) {
+            setInputValue('');
+            onSelectionChange(filterKey, null);
+            valueRef.current = '';
+            return;
         }
 
+        const baseValue = append ? valueRef.current : value;
+        let finalValue: string;
+        let tagAdded = false;
+
+        if (append && isTagFilter && baseValue) {
+            const existingTags = baseValue.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+            const newTagLower = newValue.trim().toLowerCase();
+
+            if (existingTags.some(tag => tag === newTagLower || tag.includes(newTagLower) || newTagLower.includes(tag))) {
+                setInputValue(baseValue);
+                return;
+            }
+
+            finalValue = `${baseValue},${newValue.trim()}`;
+            tagAdded = true;
+        } else {
+            finalValue = newValue.trim();
+        }
+
+        valueRef.current = finalValue;
         onSelectionChange(
             filterKey,
-            finalValue
-                ? {
-                    type: 'text',
-                    value: finalValue,
-                }
-                : null,
+            finalValue ? { type: 'text', value: finalValue } : null,
         );
-    }, [filterKey, onSelectionChange, isTagFilter, onDisplayValueChange, value]);
 
-    // Use fuzzy search to filter all database tags based on input value (for tag filters)
-    // This hook must be called unconditionally to follow Rules of Hooks
-    const filteredOptions = useMemo(() => {
-        if (!isTagFilter) {
-            return [];
+        if (clearInput && tagAdded) {
+            shouldSkipSyncRef.current = true;
+            setInputValue('');
+            setOptions([]); // Clear options after selection
+        } else {
+            setInputValue(finalValue);
         }
-        const cacheKey = category || 'all';
-        const cachedTags = globalTagsCache.get(cacheKey) || [];
+    }, [filterKey, onSelectionChange, isTagFilter, value]);
 
-        // Filter by category - only show tags matching the filter's category
-        const categoryFilteredTags = category
-            ? cachedTags.filter(tag => tag.category === category)
-            : cachedTags;
-
-        if (!inputValue || inputValue.length < 1) {
-            return categoryFilteredTags;
-        }
-
-        // Use suggestions if available (already filtered and sorted) - much faster!
-        if (suggestions.length > 0) {
-            // Filter suggestions by category too
-            const categoryFilteredSuggestions = category
-                ? suggestions.filter(s => s.category === category)
-                : suggestions;
-            return categoryFilteredSuggestions.map(s => ({ label: s.label, category: s.category }));
-        }
-
-        // Simple text filter as fallback - fast and simple
-        const normalizedInput = inputValue.toLowerCase().trim();
-        const normalizedInputNoSpaces = normalizedInput.replace(/\s+/g, '');
-        return categoryFilteredTags
-            .filter(tag => {
-                const label = tag.label.toLowerCase();
-                const labelNoSpaces = label.replace(/\s+/g, '');
-                return label.includes(normalizedInput) || labelNoSpaces.includes(normalizedInputNoSpaces);
-            })
-            .slice(0, 50);
-    }, [inputValue, category, suggestions, isTagFilter]);
-
-    // Use filtered options directly (they already include suggestions when available)
-    const allOptions = filteredOptions;
-
-    // Create options with empty option for clearing (for tag filters)
-    const selectOptions = useMemo(() => {
-        if (!isTagFilter) {
-            return [];
-        }
-        return [
-            { label: '', value: '', category: undefined as 'male' | 'female' | undefined },
-            ...allOptions.map(s => ({ label: s.label, value: s.label, category: s.category }))
-        ];
-    }, [isTagFilter, allOptions]);
-
-    // For tag filters, use Select dropdown with fuzzy search filtering
-    if (isTagFilter) {
-
-        return (
-            <Stack spacing={1}>
-                <TextFieldWrapper supportColor={supportColor} isPulsing={isBurstVisible}>
-                    <FormControl fullWidth variant="standard">
-                        <Autocomplete
-                            open={isOpen}
-                            onOpen={() => setIsOpen(true)}
-                            onClose={() => {
-                                setIsOpen(false);
-                                // Don't reset input value on close - let user's typed value persist
-                            }}
-                            options={selectOptions.map(opt => opt.value).filter(Boolean)}
-                            value={displayValue || null}
-                            inputValue={inputValue}
-                            getOptionLabel={(option) => typeof option === 'string' ? option : ''}
-                            onInputChange={(_, newInputValue, reason) => {
+    return (
+        <Stack spacing={1}>
+            <SourcesCaption supportedSources={supportedSources} />
+            <TextFieldWrapper supportColor={supportColor} isPulsing={isBurstVisible}>
+                <SupportBurst supportcolor={supportColor} visible={isBurstVisible}>
+                    {supportLabel}
+                </SupportBurst>
+                {isTagFilter ? (
+                    <Autocomplete
+                        freeSolo
+                        open={open}
+                        onOpen={() => setOpen(true)}
+                        onClose={() => setOpen(false)}
+                        options={options}
+                        loading={loading}
+                        value={null} // Controlled by inputValue
+                        inputValue={inputValue}
+                        onInputChange={(_, newInputValue, reason) => {
+                            if (reason === 'input') {
                                 setInputValue(newInputValue);
-                                // Only update displayValue if user is typing, not when selecting
-                                if (reason !== 'reset') {
-                                    setDisplayValue(newInputValue);
-                                }
-                            }}
-                            onChange={(_, newValue) => {
-                                // Handle selection - newValue is a string from our options array
-                                if (newValue !== null && typeof newValue === 'string' && newValue.trim()) {
-                                    const trimmedValue = newValue.trim();
-                                    // Call handleChange which will resolve alias and apply filter
-                                    // This will call onSelectionChange internally
-                                    handleChange(trimmedValue);
-                                    // Clear the input field after selection so user can select another tag
-                                    // Use a small delay to ensure handleChange completes first
-                                    setTimeout(() => {
-                                        setDisplayValue('');
-                                        setInputValue('');
-                                    }, 50);
-                                } else if (newValue === null) {
-                                    // Clear the filter
-                                    setDisplayValue('');
-                                    setInputValue('');
-                                    handleChange(null);
-                                }
-                                setIsOpen(false);
-                            }}
-                            freeSolo
-                            filterOptions={(options) => options} // We handle filtering with fuzzy search
-                            renderInput={(params) => (
-                                <TextField
-                                    {...params}
-                                    placeholder={placeholder}
-                                    variant="standard"
-                                    fullWidth
-                                    InputProps={{
-                                        ...params.InputProps,
-                                        endAdornment: (
-                                            <>
-                                                {params.InputProps.endAdornment}
-                                                <InputAdornment position="end">
-                                                    <SearchIcon
-                                                        fontSize="small"
-                                                        sx={{
-                                                            color: alpha('#fff', 0.5),
-                                                            transition: 'all 0.3s ease',
-                                                        }}
-                                                    />
-                                                </InputAdornment>
-                                            </>
-                                        ),
-                                    }}
-                                    autoComplete="off"
-                                    sx={{
-                                        '& .MuiInput-root': {
-                                            color: '#fff',
-                                            fontSize: '0.95rem',
-                                            transition: 'all 0.3s ease',
-                                        },
-                                        '& .MuiInput-root:before': {
-                                            borderBottomColor: alpha(supportColor, 0.3),
-                                            borderBottomWidth: '1.5px',
-                                        },
-                                        '& .MuiInput-root:hover:not(.Mui-disabled):before': {
-                                            borderBottomColor: alpha(supportColor, 0.6),
-                                            borderBottomWidth: '2px',
-                                        },
-                                        '& .MuiInput-root.Mui-focused:after': {
-                                            borderBottomColor: supportColor,
-                                            borderBottomWidth: '2.5px',
-                                            boxShadow: `0 2px 8px ${alpha(supportColor, 0.4)}`,
-                                        },
-                                        '& .MuiInput-root.Mui-focused': {
-                                            '& .MuiInputAdornment-root .MuiSvgIcon-root': {
-                                                color: supportColor,
-                                                filter: `drop-shadow(0 0 4px ${alpha(supportColor, 0.6)})`,
-                                            },
-                                        },
-                                    }}
-                                />
-                            )}
-                            renderOption={(props, option) => {
-                                const optionData = selectOptions.find(opt => opt.value === option);
-                                const { key, ...otherProps } = props;
-                                return (
-                                    <li
-                                        key={key}
-                                        {...otherProps}
-                                        style={{
-                                            backgroundColor: '#1a1a1a',
-                                            color: '#fff',
-                                            borderBottom: `1px solid ${alpha('#ea4c89', 0.1)}`,
-                                            transition: 'all 0.2s ease',
-                                            cursor: 'pointer',
-                                        }}
-                                        onMouseEnter={(e) => {
-                                            e.currentTarget.style.backgroundColor = alpha('#ea4c89', 0.15).toString();
-                                        }}
-                                        onMouseLeave={(e) => {
-                                            e.currentTarget.style.backgroundColor = '#1a1a1a';
-                                        }}
-                                    >
-                                        <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%' }}>
-                                            <Typography variant="body2" sx={{ flex: 1 }}>
-                                                {option}
+                                handleSearch(newInputValue);
+                                setOpen(true);
+                            } else if (reason === 'reset') {
+                                // Don't clear input on reset (blur/select)
+                                // setInputValue(newInputValue); 
+                            } else {
+                                setInputValue(newInputValue);
+                            }
+                        }}
+                        onChange={(_, newValue) => {
+                            const tagValue = typeof newValue === 'string' ? newValue : newValue?.canonical || '';
+                            if (tagValue) {
+                                handleChange(tagValue, true, true);
+                                setOpen(false);
+                            }
+                        }}
+                        getOptionLabel={(option) => (typeof option === 'string' ? option : option.canonical)}
+                        filterOptions={(x) => x} // Disable built-in filtering, we do it server-side
+                        noOptionsText={inputValue.length < 2 ? "Type to search..." : "No tags found"}
+                        renderInput={(params) => (
+                            <TextField
+                                {...params}
+                                placeholder={placeholder}
+                                variant="standard"
+                                fullWidth
+                                autoComplete="off"
+                                onBlur={() => {
+                                    // Commit manually typed value when blurring if it's not empty
+                                    if (inputValue && inputValue.trim() && !open) {
+                                        // Only if not selecting from dropdown
+                                        // This part is tricky with Autocomplete, usually better to let user select or press enter
+                                    }
+                                }}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter' && inputValue && inputValue.trim()) {
+                                        event.preventDefault();
+                                        const shouldAppend = isTagFilter && value && value.trim();
+                                        handleChange(inputValue.trim(), !!shouldAppend, !!shouldAppend);
+                                        setOpen(false);
+                                    }
+                                }}
+                                sx={{
+                                    flex: 1,
+                                    '& .MuiInput-root': {
+                                        color: '#fff',
+                                        fontSize: '0.95rem',
+                                    },
+                                    '& .MuiInput-root:before': {
+                                        borderBottomColor: alpha(supportColor, 0.25),
+                                    },
+                                    '& .MuiInput-root:hover:not(.Mui-disabled):before': {
+                                        borderBottomColor: alpha(supportColor, 0.5),
+                                    },
+                                    '& .MuiInput-root.Mui-focused:after': {
+                                        borderBottomColor: supportColor,
+                                    },
+                                }}
+                                InputProps={{
+                                    ...params.InputProps,
+                                    endAdornment: (
+                                        <React.Fragment>
+                                            {loading ? <CircularProgress color="inherit" size={20} /> : null}
+                                            {params.InputProps.endAdornment}
+                                        </React.Fragment>
+                                    ),
+                                }}
+                            />
+                        )}
+                        renderOption={(props, option) => {
+                            const { key, ...otherProps } = props;
+                            return (
+                                <li {...otherProps} key={option.canonical}>
+                                    <Stack sx={{ width: '100%' }}>
+                                        <Typography variant="body2" sx={{ color: '#fff' }}>
+                                            {option.canonical}
+                                        </Typography>
+                                        {option.matchType === 'alias' && (
+                                            <Typography variant="caption" sx={{ color: alpha('#fff', 0.5) }}>
+                                                Matches alias: {option.aliases.find(a => a.includes(inputValue.toLowerCase())) || 'alias'}
                                             </Typography>
-                                            {optionData?.category && (
-                                                <Chip
-                                                    label={optionData.category}
-                                                    size="small"
-                                                    sx={{
-                                                        height: 20,
-                                                        fontSize: '0.65rem',
-                                                        backgroundColor: alpha(
-                                                            optionData.category === 'female' ? '#ea4c89' : '#4caf50',
-                                                            0.2
-                                                        ),
-                                                        color: optionData.category === 'female' ? '#ea4c89' : '#4caf50',
-                                                    }}
-                                                />
-                                            )}
-                                        </Stack>
-                                    </li>
-                                );
-                            }}
-                            componentsProps={{
-                                paper: {
-                                    sx: {
-                                        background: `linear-gradient(135deg, ${alpha('#1a1a1a', 0.98)}, ${alpha('#2a1a2a', 0.98)})`,
-                                        backgroundImage: 'none',
-                                        border: `1.5px solid ${alpha('#ea4c89', 0.3)}`,
-                                        borderRadius: 2,
-                                        boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.25)}, inset 0 1px 0 ${alpha('#fff', 0.05)}`,
-                                        maxHeight: 400,
-                                        overflow: 'hidden',
-                                        '& .MuiAutocomplete-listbox': {
-                                            padding: 0,
-                                            '& .MuiAutocomplete-option': {
-                                                color: '#fff',
-                                                transition: 'all 0.2s ease',
+                                        )}
+                                    </Stack>
+                                </li>
+                            );
+                        }}
+                        componentsProps={{
+                            paper: {
+                                sx: {
+                                    backgroundColor: '#1a1a1a',
+                                    backgroundImage: 'none',
+                                    border: `1px solid ${alpha('#ea4c89', 0.3)}`,
+                                    boxShadow: `0 4px 20px ${alpha('#ea4c89', 0.2)}`,
+                                    marginTop: '4px',
+                                    '& .MuiAutocomplete-listbox': {
+                                        padding: 0,
+                                        '& .MuiAutocomplete-option': {
+                                            padding: '8px 16px',
+                                            '&:hover, &.Mui-focused': {
+                                                backgroundColor: alpha('#ea4c89', 0.15),
+                                            },
+                                            '&[aria-selected="true"]': {
+                                                backgroundColor: alpha('#ea4c89', 0.25),
                                                 '&:hover, &.Mui-focused': {
-                                                    background: `linear-gradient(90deg, ${alpha('#ea4c89', 0.2)}, ${alpha('#f082ac', 0.15)})`,
-                                                    transform: 'translateX(2px)',
+                                                    backgroundColor: alpha('#ea4c89', 0.35),
                                                 },
                                             },
                                         },
                                     },
                                 },
-                            }}
-                        />
-                    </FormControl>
-                    <InputAdornment position="end" sx={{ position: 'absolute', right: 0, pointerEvents: 'none' }}>
-                        <SearchIcon fontSize="small" sx={{ color: alpha('#fff', 0.5) }} />
-                    </InputAdornment>
-                </TextFieldWrapper>
-            </Stack>
-        );
-    }
-
-    // For non-tag filters, use simple TextField
-    return (
-        <Stack spacing={1}>
-            <TextFieldWrapper supportColor={supportColor} isPulsing={isBurstVisible}>
-                <TextField
-                    value={value}
-                    onChange={(event) => handleChange(event.target.value)}
-                    placeholder={placeholder}
-                    fullWidth
-                    InputProps={{
-                        endAdornment: (
-                            <InputAdornment position="end">
-                                <SearchIcon fontSize="small" />
-                            </InputAdornment>
-                        ),
-                    }}
-                    variant="standard"
-                    autoComplete="off"
-                />
+                            },
+                        }}
+                        sx={{
+                            flex: 1,
+                            '& .MuiAutocomplete-popupIndicator': { display: 'none' },
+                            '& .MuiAutocomplete-clearIndicator': { color: alpha(supportColor, 0.5) },
+                            '& .MuiAutocomplete-inputRoot': { paddingRight: '14px !important' },
+                        }}
+                    />
+                ) : (
+                    <TextField
+                        value={inputValue}
+                        onChange={(event) => handleChange(event.target.value)}
+                        placeholder={placeholder}
+                        fullWidth
+                        InputProps={{
+                            endAdornment: (
+                                <InputAdornment position="end">
+                                    <SearchIcon fontSize="small" />
+                                </InputAdornment>
+                            ),
+                        }}
+                        variant="standard"
+                        autoComplete="off"
+                    />
+                )}
+                <SupportIndicator supportcolor={supportColor}>{supportLabel}</SupportIndicator>
             </TextFieldWrapper>
         </Stack>
     );
 };
 
 export type ModeOneFilterPanelProps = {
-    onTagDisplayValuesChange?: (displayValues: Record<string, string>) => void;
     open: boolean;
     onClose: () => void;
     aggregatedFilters: AggregatedFilter[];
+    availableSourceKeys: ModeOneSourceKey[];
     selection: ModeOneFilterSelection;
     onSelectionChange: SelectionHandler;
     query: string;
@@ -1303,10 +1110,10 @@ export type ModeOneFilterPanelProps = {
 };
 
 export const ModeOneFilterPanel = ({
-    onTagDisplayValuesChange,
     open,
     onClose,
     aggregatedFilters,
+    availableSourceKeys,
     selection,
     onSelectionChange,
     query,
@@ -1324,437 +1131,326 @@ export const ModeOneFilterPanel = ({
     const [expandedCommon, setExpandedCommon] = useState(true);
     const [expandedAdvanced, setExpandedAdvanced] = useState(false);
 
-    // Simple placeholder for tag filters
-    const getTagPlaceholder = (): string => {
-        return 'What are you looking for?';
-    };
-
     const filtersByKey = useMemo(() => {
         const map = new Map<string, AggregatedFilter>();
         aggregatedFilters.forEach((filter) => map.set(filter.key, filter));
         return map;
     }, [aggregatedFilters]);
 
-    const tagIndex = useMemo(() => {
-        const map = new Map<string, TagSearchEntryInternal>();
-
-        aggregatedFilters.forEach((filter) => {
-            if (filter.type !== 'select' || !TAG_FILTER_LABEL_PATTERN.test(filter.label)) {
-                return;
-            }
-
-            filter.options?.forEach((option) => {
-                const normalizedKeys = option.normalizedKeys?.length
-                    ? option.normalizedKeys
-                    : [option.label.toLowerCase()];
-
-                let entry: TagSearchEntryInternal | undefined;
-                for (const alias of normalizedKeys) {
-                    const existing = map.get(alias);
-                    if (existing) {
-                        entry = existing;
-                        break;
-                    }
-                }
-
-                if (!entry) {
-                    entry = {
-                        label: option.label,
-                        sources: new Set(option.sources),
-                        normalizedKeys: new Set(normalizedKeys),
-                        perSourceValues: new Map(),
-                        filterOptionRefs: new Map(),
-                    };
-                } else {
-                    option.sources.forEach((source) => entry!.sources.add(source));
-                    normalizedKeys.forEach((alias) => entry!.normalizedKeys.add(alias));
-                    if (option.label.length < entry.label.length) {
-                        entry.label = option.label;
-                    }
-                }
-
-                option.sources.forEach((source) => {
-                    const resolvedValue = option.perSourceValues?.[source] ?? option.label;
-                    if (resolvedValue !== undefined) {
-                        entry!.perSourceValues.set(source, resolvedValue);
-                    }
-                });
-
-                entry.filterOptionRefs.set(filter.key, option.key);
-
-                const fallbackValuePreference: ModeOneSourceKey[] = ['hentai2read', 'ehentai', 'hentaifox', 'hitomi'];
-                const fallbackResolvedValue =
-                    fallbackValuePreference
-                        .map((source) => option.perSourceValues?.[source])
-                        .find((value): value is string => value !== undefined)
-                    ?? option.key
-                    ?? option.label;
-
-                MODE_ONE_QUERY_FALLBACK_SOURCES.forEach((source) => {
-                    entry!.sources.add(source);
-                    if (!entry!.perSourceValues.has(source)) {
-                        const specific = option.perSourceValues?.[source];
-                        entry!.perSourceValues.set(source, specific ?? fallbackResolvedValue);
-                    }
-                });
-
-                normalizedKeys.forEach((alias) => {
-                    map.set(alias, entry!);
-                });
-            });
-        });
-
-        return map;
-    }, [aggregatedFilters]);
-
-    const tagTextFilters = useMemo(
-        () =>
-            aggregatedFilters
-                .filter((filter) => filter.type === 'text' && TAG_FILTER_LABEL_PATTERN.test(filter.label))
-                .map((filter) => ({
-                    key: filter.key,
-                    sources: Object.keys(filter.perSource) as ModeOneSourceKey[],
-                })),
-        [aggregatedFilters],
-    );
-
     const [tagSearchValue, setTagSearchValue] = useState('');
+    const [tagSearchSelection, setTagSearchSelection] = useState<TagSuggestion | null>(null);
+    const [tagGraphVersion, setTagGraphVersion] = useState(0);
     const [isTagBurstVisible, setIsTagBurstVisible] = useState(false);
-    const [sqlSearchResults, setSqlSearchResults] = useState<Array<{ canonical: string; aliases: string[]; category: 'male' | 'female' }>>([]);
+    const [showAllTagSuggestions, setShowAllTagSuggestions] = useState(false);
+    const [hasRequestedTagSynonyms, setHasRequestedTagSynonyms] = useState(false);
+    const [recommendationsOpen, setRecommendationsOpen] = useState(false);
+    const [recommendedTags, setRecommendedTags] = useState<string[]>([]);
+    const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false);
 
-    const { tagOptions, tagOptionLookup } = useMemo(() => {
-        const entryToOption = new Map<TagSearchEntryInternal, TagSearchOption>();
-        const options: TagSearchOption[] = [];
-
-        tagIndex.forEach((entry) => {
-            if (entryToOption.has(entry)) {
-                return;
+    const ensureTagSynonymsRequested = useCallback(() => {
+        setHasRequestedTagSynonyms((alreadyRequested) => {
+            if (alreadyRequested) {
+                return alreadyRequested;
             }
-
-            const option: TagSearchOption = {
-                label: entry.label,
-                normalizedKeys: [...entry.normalizedKeys],
-                sources: [...entry.sources],
-                perSourceValues: Object.fromEntries(entry.perSourceValues) as Partial<Record<ModeOneSourceKey, string>>,
-                filterOptionRefs: Object.fromEntries(entry.filterOptionRefs),
-                entry,
-            };
-
-            entryToOption.set(entry, option);
-            options.push(option);
+            void initializeTagSynonyms().catch((error) => {
+                console.warn('Failed to initialize tag synonyms:', error);
+                setHasRequestedTagSynonyms(false);
+            });
+            return true;
         });
+    }, []);
 
-        options.sort((a, b) => a.label.localeCompare(b.label));
-
-        return { tagOptions: options, tagOptionLookup: entryToOption };
-    }, [tagIndex]);
-
-    const tagSearchMatch = useMemo(() => {
-        const normalized = normalizeForMatch(tagSearchValue);
-        if (!normalized) {
-            return undefined;
-        }
-
-        // First try exact match in tag index
-        let entry = tagIndex.get(normalized);
-
-        // If no exact match, check custom synonyms
-        if (!entry) {
-            const customSynonym = CUSTOM_TAG_SYNONYMS[normalized];
-            if (customSynonym) {
-                entry = tagIndex.get(customSynonym.toLowerCase());
-            }
-        }
-
-        if (!entry) {
-            return undefined;
-        }
-        return tagOptionLookup.get(entry);
-    }, [tagIndex, tagOptionLookup, tagSearchValue]);
-
-    // Search SQL database when tag search value changes
     useEffect(() => {
-        const normalized = normalizeForMatch(tagSearchValue);
-        if (!normalized || normalized.length < 2) {
-            setSqlSearchResults([]);
-            return;
+        const unsubscribe = subscribeToTagGraph(() => {
+            setTagGraphVersion((value) => value + 1);
+        });
+        return unsubscribe;
+    }, []);
+
+    useEffect(() => {
+        if (tagSearchValue) {
+            ensureTagSynonymsRequested();
         }
+    }, [tagSearchValue, ensureTagSynonymsRequested]);
 
-        // Debounce the search to avoid too many queries
-        const timeoutId = setTimeout(() => {
-            // Ensure database is ready and search
-            void (async () => {
-                try {
-                    const isReady = await ensureDatabaseReady();
-                    if (!isReady) {
-                        setSqlSearchResults([]);
-                        return;
-                    }
-
-                    // Search with higher limit and lower minScore for better results
-                    const results = searchCustomTags(tagSearchValue, {
-                        limit: 20,
-                        minScore: 30
-                    });
-
-                    // Convert SQL results to a simpler format, sorted by score
-                    const simplified = results
-                        .sort((a, b) => b.score - a.score)
-                        .map(r => ({
-                            canonical: r.canonical,
-                            aliases: r.aliases || [],
-                            category: r.category,
-                            score: r.score,
-                        }));
-                    setSqlSearchResults(simplified);
-                } catch (error) {
-                    // Silently fail - database might not be ready yet
-                    setSqlSearchResults([]);
-                }
-            })();
-        }, 300); // 300ms debounce
-
-        return () => clearTimeout(timeoutId);
+    useEffect(() => {
+        setShowAllTagSuggestions(false);
     }, [tagSearchValue]);
 
-    const tagSearchCandidate = useMemo(() => {
-        if (tagSearchMatch) {
-            return tagSearchMatch;
+    const allTagSuggestions = useMemo(
+        () => getTagSuggestions(tagSearchValue, availableSourceKeys, 40),
+        [tagSearchValue, availableSourceKeys, tagGraphVersion],
+    );
+
+    const displayedTagSuggestions = useMemo(() => {
+        if (showAllTagSuggestions) {
+            return allTagSuggestions;
         }
-        const normalized = normalizeForMatch(tagSearchValue);
-        if (!normalized) {
-            return undefined;
+        const limited = allTagSuggestions.slice(0, 5);
+        if (
+            tagSearchSelection &&
+            !limited.some((suggestion) => suggestion.canonical === tagSearchSelection.canonical)
+        ) {
+            return [...limited, tagSearchSelection];
         }
-
-        // Check custom synonyms before fuzzy matching
-        const customSynonym = CUSTOM_TAG_SYNONYMS[normalized];
-        if (customSynonym) {
-            const synonymEntry = tagIndex.get(customSynonym.toLowerCase());
-            if (synonymEntry) {
-                return tagOptionLookup.get(synonymEntry);
-            }
-        }
-
-        // Try to find match in SQL database results first
-        if (sqlSearchResults.length > 0) {
-            // Try each SQL result in order of relevance
-            for (const sqlMatch of sqlSearchResults) {
-                // First try canonical name
-                const canonicalLower = sqlMatch.canonical.toLowerCase();
-                let sqlEntry = tagIndex.get(canonicalLower);
-                if (sqlEntry) {
-                    return tagOptionLookup.get(sqlEntry);
-                }
-
-                // Try aliases
-                for (const alias of sqlMatch.aliases) {
-                    const aliasLower = alias.toLowerCase();
-                    sqlEntry = tagIndex.get(aliasLower);
-                    if (sqlEntry) {
-                        return tagOptionLookup.get(sqlEntry);
-                    }
-                }
-
-                // Try partial matches (if canonical contains the search term)
-                if (canonicalLower.includes(normalized)) {
-                    // Find closest match in tag options
-                    const closest = findClosestOption(canonicalLower, tagOptions);
-                    if (closest) {
-                        return closest;
-                    }
-                }
-            }
-        }
-
-        // Fall back to fuzzy matching only if no custom synonym or SQL match found
-        return findClosestOption(normalized, tagOptions);
-    }, [tagOptions, tagSearchMatch, tagSearchValue, tagIndex, tagOptionLookup, sqlSearchResults]);
+        return limited;
+    }, [allTagSuggestions, showAllTagSuggestions, tagSearchSelection]);
 
     useEffect(() => {
-        if (!tagSearchMatch) {
+        if (!allTagSuggestions.length) {
+            setTagSearchSelection(null);
+            return;
+        }
+        setTagSearchSelection((current) => {
+            if (!current) {
+                return allTagSuggestions[0];
+            }
+            const match = allTagSuggestions.find((suggestion) => suggestion.canonical === current.canonical);
+            return match ?? allTagSuggestions[0];
+        });
+    }, [allTagSuggestions]);
+
+    useEffect(() => {
+        if (!tagSearchSelection) {
             setIsTagBurstVisible(false);
             return;
         }
         setIsTagBurstVisible(true);
         const timeout = setTimeout(() => setIsTagBurstVisible(false), 520);
         return () => clearTimeout(timeout);
-    }, [tagSearchMatch]);
+    }, [tagSearchSelection]);
 
-    const resolveTagValueForSources = useCallback(
-        (option: TagSearchOption, preferredSources: ModeOneSourceKey[]) => {
-            const priority = new Set<ModeOneSourceKey>([
-                ...preferredSources,
-                'hentai2read',
-                'ehentai',
-                'hentaifox',
-                'hitomi',
-            ]);
-            for (const source of priority) {
-                const value = option.perSourceValues[source];
-                if (value) {
-                    return value;
-                }
-            }
-            return option.label;
-        },
-        [],
-    );
+    const tagSupportCount = tagSearchSelection ? tagSearchSelection.support.length : 0;
+    const tagSupportColor = getSupportColor(tagSupportCount);
+    const tagSupportLabel = buildSupportLabel(tagSupportCount);
+
+    const tagSearchFeedback = useMemo(() => {
+        if (!tagSearchValue.trim()) {
+            return t('modeOne.filters.tagSearch.help');
+        }
+        if (!tagSearchSelection) {
+            return t('modeOne.filters.tagSearch.missing');
+        }
+        if (!tagSearchSelection.support.length) {
+            return t('modeOne.filters.tagSearch.missing');
+        }
+        const sourceLabels = tagSearchSelection.support.map((source) => MODE_ONE_SOURCE_LABELS[source]).join(', ');
+        return sourceLabels ? 'Available on: ' + sourceLabels : t('modeOne.filters.tagSearch.missing');
+    }, [tagSearchSelection, tagSearchValue, t]);
 
     const handleTagApply = useCallback(() => {
-        if (!tagSearchCandidate) {
+        const suggestion = tagSearchSelection ?? allTagSuggestions[0];
+        if (!suggestion) {
+            return;
+        }
+        const plan = planTagSelection(suggestion.canonical, availableSourceKeys);
+        if (!plan.filters.length) {
+            return;
+        }
+        plan.filters.forEach((instruction) => {
+            if (instruction.filterType === 'select') {
+                if (instruction.optionKey) {
+                    onSelectionChange(instruction.filterKey, { type: 'select', value: instruction.optionKey });
+                }
+            } else if (instruction.filterType === 'text') {
+                if (instruction.value) {
+                    onSelectionChange(instruction.filterKey, { type: 'text', value: instruction.value });
+                }
+            }
+        });
+        setTagSearchValue('');
+        setTagSearchSelection(null);
+    }, [tagSearchSelection, allTagSuggestions, availableSourceKeys, onSelectionChange]);
+
+    const activeFilterChips = useMemo(
+        () => {
+            const chips: Array<{ key: string; label: string; filterKey: string; onDelete: () => void }> = [];
+
+            Object.entries(selection).forEach(([filterKey, selectionValue]) => {
+                const filter = filtersByKey.get(filterKey);
+                if (!filter) {
+                    return;
+                }
+
+                switch (filter.type) {
+                    case 'select':
+                        if (selectionValue?.type !== 'select' || !selectionValue.value) {
+                            return;
+                        }
+                        const optionLabel = filter.options?.find((option) => option.key === selectionValue.value)?.label;
+                        const selectLabel = optionLabel ?? selectionValue.value;
+                        chips.push({
+                            key: `${filterKey}-${selectionValue.value}`,
+                            label: `${filter.label}: ${selectLabel}`,
+                            filterKey,
+                            onDelete: () => onSelectionChange(filterKey, null),
+                        });
+                        break;
+                    case 'checkbox':
+                        if (selectionValue?.type !== 'checkbox' || !selectionValue.value) {
+                            return;
+                        }
+                        chips.push({
+                            key: `${filterKey}-checkbox`,
+                            label: `${filter.label}: ${t('modeOne.filters.chip.checkbox')}`,
+                            filterKey,
+                            onDelete: () => onSelectionChange(filterKey, null),
+                        });
+                        break;
+                    case 'tri':
+                        if (selectionValue?.type !== 'tri' || selectionValue.value === TriState.Ignore) {
+                            return;
+                        }
+                        const triLabel = selectionValue.value === TriState.Include
+                            ? t('modeOne.filters.tri.include')
+                            : t('modeOne.filters.tri.exclude');
+                        chips.push({
+                            key: `${filterKey}-${selectionValue.value}`,
+                            label: `${filter.label}: ${triLabel}`,
+                            filterKey,
+                            onDelete: () => onSelectionChange(filterKey, null),
+                        });
+                        break;
+                    case 'text':
+                        if (selectionValue?.type !== 'text' || !selectionValue.value) {
+                            return;
+                        }
+                        {
+                            // Check if this is a tag filter (female/male tags) with multiple comma-separated tags
+                            const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filter.label) || isGenderTagFilter(filter.label);
+
+                            if (isTagFilter && selectionValue.value.includes(',')) {
+                                // For tag filters with multiple tags, create a separate chip for each tag
+                                const tags = selectionValue.value.split(',').map(t => {
+                                    const trimmed = t.trim();
+                                    return canonicalizeTagValue(trimmed) || trimmed;
+                                }).filter(Boolean);
+
+                                // Store original values for deletion
+                                const originalTags = selectionValue.value.split(',').map(t => t.trim()).filter(Boolean);
+
+                                tags.forEach((tag, index) => {
+                                    chips.push({
+                                        key: `${filterKey}-tag-${index}-${tag}`,
+                                        label: tag,
+                                        filterKey,
+                                        onDelete: () => {
+                                            // Remove this specific tag from the comma-separated list
+                                            // Use originalTags to preserve the exact format
+                                            const remainingTags = originalTags.filter((_, i) => i !== index);
+                                            if (remainingTags.length === 0) {
+                                                onSelectionChange(filterKey, null);
+                                            } else {
+                                                onSelectionChange(filterKey, {
+                                                    type: 'text',
+                                                    value: remainingTags.join(','),
+                                                });
+                                            }
+                                        },
+                                    });
+                                });
+                            } else if (isTagFilter) {
+                                // For single tag filters, show just the tag name (cleaner look)
+                                const displayValue = canonicalizeTagValue(selectionValue.value) || selectionValue.value;
+                                chips.push({
+                                    key: `${filterKey}-tag-${displayValue}`,
+                                    label: displayValue,
+                                    filterKey,
+                                    onDelete: () => onSelectionChange(filterKey, null),
+                                });
+                            } else {
+                                // For non-tag text filters, use canonicalized value with translation
+                                const displayValue = canonicalizeTagValue(selectionValue.value) || selectionValue.value;
+                                chips.push({
+                                    key: `${filterKey}-text`,
+                                    label: `${filter.label}: ${t('modeOne.filters.chip.text', { value: displayValue })}`,
+                                    filterKey,
+                                    onDelete: () => onSelectionChange(filterKey, null),
+                                });
+                            }
+                        }
+                        break;
+                    default:
+                        return;
+                }
+            });
+
+            return chips;
+        },
+        [filtersByKey, selection, t, onSelectionChange],
+    );
+
+    // Extract active tags from selection
+    const activeTags = useMemo(() => {
+        const tags: string[] = [];
+        Object.entries(selection).forEach(([filterKey, selectionValue]) => {
+            const filter = filtersByKey.get(filterKey);
+            if (!filter) return;
+
+            // Check if it's a tag filter
+            const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filter.label) || isGenderTagFilter(filter.label);
+            if (!isTagFilter) return;
+
+            // Extract tag values (comma-separated)
+            if (selectionValue?.type === 'text' && selectionValue.value) {
+                const tagValues = selectionValue.value.split(',').map(t => t.trim()).filter(Boolean);
+                tags.push(...tagValues);
+            }
+        });
+        return tags;
+    }, [selection, filtersByKey]);
+
+    // Get recommended tags based on active tags
+    const handleGetRecommendations = useCallback(async () => {
+        if (activeTags.length === 0) {
             return;
         }
 
-        Object.entries(tagSearchCandidate.filterOptionRefs).forEach(([filterKey, optionKey]) => {
-            if (!optionKey) {
-                return;
-            }
-            onSelectionChange(filterKey, { type: 'select', value: optionKey });
-        });
+        setIsLoadingRecommendations(true);
+        setRecommendationsOpen(true);
 
-        tagTextFilters.forEach(({ key, sources }) => {
-            const relevantSources = sources.filter((source) => tagSearchCandidate.sources.includes(source));
-            if (!relevantSources.length) {
-                return;
-            }
-            const nextValue = resolveTagValueForSources(tagSearchCandidate, relevantSources);
-            const currentSelection = selection[key];
-            const currentValue = currentSelection?.type === 'text' ? currentSelection.value : '';
-            if (currentValue === nextValue) {
-                return;
-            }
-            onSelectionChange(key, { type: 'text', value: nextValue });
-        });
+        try {
+            await ensureDatabaseReady();
 
-        setTagSearchValue('');
-        setIsTagBurstVisible(false);
-    }, [
-        onSelectionChange,
-        resolveTagValueForSources,
-        selection,
-        setIsTagBurstVisible,
-        setTagSearchValue,
-        tagSearchCandidate,
-        tagTextFilters,
-    ]);
+            // Get recommendations for each active tag
+            const allRecommendations = new Map<string, number>();
 
-    // Store display values (aliases) for tag filters separately from canonical values
-    const [tagDisplayValues, setTagDisplayValues] = useState<Record<string, string>>({});
+            for (const tag of activeTags) {
+                // Clean tag (remove gender prefix)
+                const cleanTag = tag.replace(/^(?:male|female):\s*/i, '').trim();
+                if (!cleanTag) continue;
 
-    // Memoize the display value change handler to prevent infinite loops
-    const handleDisplayValueChange = useCallback((key: string, displayValue: string | null) => {
-        // Store display value (alias) for tag filters
-        // When a new tag is selected, displayValue is the alias to append
-        if (displayValue) {
-            setTagDisplayValues((prev) => {
-                const current = prev[key] || '';
-                const existingTags = current ? current.split(',').map(t => t.trim()).filter(Boolean) : [];
-                // Only add if not already present
-                if (!existingTags.includes(displayValue)) {
-                    const next = {
-                        ...prev,
-                        [key]: [...existingTags, displayValue].join(','),
-                    };
-                    // Notify parent of display values change
-                    if (onTagDisplayValuesChange) {
-                        onTagDisplayValuesChange(next);
-                    }
-                    return next;
+                try {
+                    const recommendations = await getRecommendedTags(cleanTag, { limit: 20 });
+                    recommendations.forEach(rec => {
+                        // Skip if it's already an active tag
+                        const isActive = activeTags.some(active =>
+                            active.toLowerCase().includes(rec.toLowerCase()) ||
+                            rec.toLowerCase().includes(active.toLowerCase())
+                        );
+                        if (!isActive) {
+                            allRecommendations.set(rec, (allRecommendations.get(rec) || 0) + 1);
+                        }
+                    });
+                } catch (error) {
+                    console.warn(`Failed to get recommendations for tag ${cleanTag}:`, error);
                 }
-                return prev;
-            });
-        } else {
-            setTagDisplayValues((prev) => {
-                const next = { ...prev };
-                delete next[key];
-                // Notify parent of display values change
-                if (onTagDisplayValuesChange) {
-                    onTagDisplayValuesChange(next);
-                }
-                return next;
-            });
+            }
+
+            // Sort by frequency (most recommended first) and take top 20
+            const sorted = Array.from(allRecommendations.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 20)
+                .map(([tag]) => tag);
+
+            setRecommendedTags(sorted);
+        } catch (error) {
+            console.error('Failed to get recommendations:', error);
+            setRecommendedTags([]);
+        } finally {
+            setIsLoadingRecommendations(false);
         }
-    }, [onTagDisplayValuesChange]);
-
-    const activeFilterChips = useMemo(
-        () =>
-            Object.entries(selection)
-                .map(([filterKey, selectionValue]) => {
-                    const filter = filtersByKey.get(filterKey);
-                    if (!filter) {
-                        return undefined;
-                    }
-
-                    let valueLabel: string | undefined | Array<{ key: string; label: string; filterKey: string; tagIndex: number; canonicalTag: string }>;
-                    switch (filter.type) {
-                        case 'select':
-                            if (selectionValue?.type !== 'select' || !selectionValue.value) {
-                                return undefined;
-                            }
-                            valueLabel = filter.options?.find((option) => option.key === selectionValue.value)?.label;
-                            valueLabel ??= selectionValue.value;
-                            break;
-                        case 'checkbox':
-                            if (selectionValue?.type !== 'checkbox' || !selectionValue.value) {
-                                return undefined;
-                            }
-                            valueLabel = t('modeOne.filters.chip.checkbox');
-                            break;
-                        case 'tri':
-                            if (selectionValue?.type !== 'tri' || selectionValue.value === TriState.Ignore) {
-                                return undefined;
-                            }
-                            valueLabel = selectionValue.value === TriState.Include
-                                ? t('modeOne.filters.tri.include')
-                                : t('modeOne.filters.tri.exclude');
-                            break;
-                        case 'text':
-                            if (selectionValue?.type !== 'text' || !selectionValue.value) {
-                                return undefined;
-                            }
-                            // For tag filters, show multiple tags as separate chips
-                            const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filter.label);
-                            if (isTagFilter) {
-                                // Split comma-separated tags and create a chip for each
-                                const canonicalTags = selectionValue.value.split(',').map(t => t.trim()).filter(Boolean);
-                                const displayTags = tagDisplayValues[filterKey]
-                                    ? tagDisplayValues[filterKey].split(',').map(t => t.trim()).filter(Boolean)
-                                    : canonicalTags;
-
-                                // Return multiple chips, one for each tag
-                                return canonicalTags.map((canonicalTag, index) => {
-                                    const displayTag = displayTags[index] || canonicalTag;
-                                    return {
-                                        key: `${filterKey}-${index}-${canonicalTag}`,
-                                        label: `${filter.label}: ${displayTag}`,
-                                        filterKey,
-                                        tagIndex: index,
-                                        canonicalTag,
-                                    };
-                                });
-                            }
-                            // For non-tag text filters, show single value
-                            const displayValue = selectionValue.value;
-                            valueLabel = t('modeOne.filters.chip.text', { value: displayValue });
-                            break;
-                        default:
-                            return undefined;
-                    }
-
-                    // For tag filters, we already returned an array of chips above
-                    if (Array.isArray(valueLabel)) {
-                        return valueLabel;
-                    }
-
-                    return {
-                        key: filter.key,
-                        label: `${filter.label}: ${valueLabel}`,
-                    };
-                })
-                .flat() // Flatten array of chips (some entries may be arrays for multiple tags)
-                .filter((chip): chip is { key: string; label: string; filterKey?: string; tagIndex?: number; canonicalTag?: string } => !!chip),
-        [filtersByKey, selection, t, tagDisplayValues],
-    );
+    }, [activeTags]);
 
     const resolveSelectHint = useCallback(
         (values: string, more: number) => {
@@ -1787,11 +1483,15 @@ export const ModeOneFilterPanel = ({
             // 2. Female/Male tag filters
             if (COMMON_FILTER_KEYS.includes(filter.key) || isGenderTagFilter(filter.label)) {
                 common.push(filter);
-                if (isActive) commonActive++;
+                if (isActive) {
+                    commonActive += 1;
+                }
             } else {
                 // Everything else goes to advanced
                 advanced.push(filter);
-                if (isActive) advancedActive++;
+                if (isActive) {
+                    advancedActive += 1;
+                }
             }
         });
 
@@ -1811,95 +1511,67 @@ export const ModeOneFilterPanel = ({
     const liveUpdatesDisabledHint = 'Click Apply to update results';
     const liveUpdatesPendingHint = 'You have unsaved changes - click Apply';
     const tagSearchPlaceholder = t('modeOne.filters.tagSearch.placeholder');
-    const tagSearchHelp = t('modeOne.filters.tagSearch.help');
-    const tagSearchMissing = t('modeOne.filters.tagSearch.missing');
-    const tagSearchHint = (count: number): string => {
-        if (count === 4) return 'Perfect support - available everywhere!';
-        if (count === 3) return 'Great support - widely available';
-        if (count === 2) return 'Good support - available in some sources';
-        if (count === 1) return 'Rare tag - limited availability';
-        return 'No sources have this tag yet';
-    };
-
-    const tagSupportCount = tagSearchMatch ? tagSearchMatch.sources.length : 0;
-    const tagSupportColor = getSupportColor(tagSupportCount);
-    const tagSupportLabel = buildSupportLabel(tagSupportCount);
-    const tagSearchFeedback = tagSearchValue
-        ? tagSearchMatch
-            ? tagSearchHint(tagSupportCount)
-            : tagSearchMissing
-        : tagSearchHelp;
 
     // Helper function to render a filter control
-    const renderFilterControl = useCallback((filter: AggregatedFilter) => {
-        const supportedSourcesSet = new Set<ModeOneSourceKey>(
-            Object.keys(filter.perSource) as ModeOneSourceKey[],
-        );
-        if (filter.type === 'select' || filter.type === 'text') {
-            MODE_ONE_QUERY_FALLBACK_SOURCES.forEach((source) =>
-                supportedSourcesSet.add(source),
-            );
-        }
-        const supportedSources = [...supportedSourcesSet];
-        const selectionValue = selection[filter.key];
+    const renderFilterControl = useCallback(
+        (filter: AggregatedFilter) => {
+            const supportedSourcesSet = new Set<ModeOneSourceKey>(Object.keys(filter.perSource) as ModeOneSourceKey[]);
+            if (filter.type === 'select' || filter.type === 'text') {
+                MODE_ONE_QUERY_FALLBACK_SOURCES.forEach((source) => supportedSourcesSet.add(source));
+            }
+            const supportedSources = [...supportedSourcesSet];
+            const selectionValue = selection[filter.key];
 
-        let control: JSX.Element | null = null;
+            let control: JSX.Element | null = null;
 
-        switch (filter.type) {
-            case 'select':
-                control = (
-                    <SelectFilterControl
-                        filterKey={filter.key}
-                        label={filter.label}
-                        options={filter.options ?? []}
-                        selectedValue={selectionValue?.type === 'select' ? selectionValue.value ?? undefined : undefined}
-                        supportedSources={supportedSources}
-                        onSelectionChange={onSelectionChange}
-                        placeholder={placeholderSelect}
-                        hintResolver={resolveSelectHint}
-                    />
-                );
-                break;
-            case 'text':
-                control = (
-                    <TextFilterControl
-                        filterKey={filter.key}
-                        supportedSources={supportedSources}
-                        value={selectionValue?.type === 'text' ? selectionValue.value : ''}
-                        onSelectionChange={(key, value) => {
-                            // Store display value for tag filters before calling onSelectionChange
-                            const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filter.label);
-                            if (isTagFilter && value?.type === 'text' && value.value) {
-                                // The TextFilterControl will resolve alias to canonical
-                                // We need to get the display value from the component
-                                // For now, we'll handle this in the TextFilterControl callback
+            switch (filter.type) {
+                case 'select':
+                    control = (
+                        <SelectFilterControl
+                            filterKey={filter.key}
+                            options={filter.options ?? []}
+                            selectedValue={
+                                selectionValue?.type === 'select' ? (selectionValue.value ?? undefined) : undefined
                             }
-                            onSelectionChange(key, value);
-                        }}
-                        placeholder={TAG_FILTER_LABEL_PATTERN.test(filter.label) ? getTagPlaceholder() : placeholderText}
-                        label={filter.label}
-                        onDisplayValueChange={TAG_FILTER_LABEL_PATTERN.test(filter.label) ? handleDisplayValueChange : undefined}
-                    />
-                );
-                break;
-            default:
-                control = null;
-        }
+                            supportedSources={supportedSources}
+                            onSelectionChange={onSelectionChange}
+                            placeholder={placeholderSelect}
+                            hintResolver={resolveSelectHint}
+                        />
+                    );
+                    break;
+                case 'text':
+                    control = (
+                        <TextFilterControl
+                            filterKey={filter.key}
+                            filterLabel={filter.label}
+                            supportedSources={supportedSources}
+                            value={selectionValue?.type === 'text' ? selectionValue.value : ''}
+                            onSelectionChange={onSelectionChange}
+                            placeholder={placeholderText}
+                        />
+                    );
+                    break;
+                default:
+                    control = null;
+            }
 
-        if (!control) {
-            return null;
-        }
+            if (!control) {
+                return null;
+            }
 
-        return (
-            <Stack key={filter.key} spacing={0.5}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#fff' }}>
-                    {filter.label}
-                </Typography>
-                {control}
-                <Divider sx={{ opacity: 0.2, borderColor: alpha('#ea4c89', 0.1) }} />
-            </Stack>
-        );
-    }, [onSelectionChange, placeholderSelect, placeholderText, resolveSelectHint, selection, handleDisplayValueChange]);
+            return (
+                <Stack key={filter.key} spacing={0.5}>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#fff' }}>
+                        {filter.label}
+                    </Typography>
+                    {control}
+                    <Divider sx={{ opacity: 0.2, borderColor: alpha('#ea4c89', 0.1) }} />
+                </Stack>
+            );
+        },
+        [onSelectionChange, placeholderSelect, placeholderText, resolveSelectHint, selection],
+    );
 
     return (
         <Dialog
@@ -1913,187 +1585,444 @@ export const ModeOneFilterPanel = ({
                     backgroundImage: 'none',
                     border: `2px solid ${alpha('#ea4c89', 0.3)}`,
                     boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.2)}`,
-                }
+                },
             }}
         >
-            <DialogTitle sx={{
-                pb: 2.5,
-                pt: 3,
-                background: `linear-gradient(135deg, ${alpha('#1a1a1a', 0.95)}, ${alpha('#2a1a2a', 0.95)})`,
-                borderBottom: `2px solid ${alpha('#ea4c89', 0.3)}`,
-                boxShadow: `0 4px 20px ${alpha('#ea4c89', 0.15)}`,
-                position: 'relative',
-                '&::after': {
-                    content: '""',
-                    position: 'absolute',
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    height: '1px',
-                    background: `linear-gradient(90deg, transparent, ${alpha('#ea4c89', 0.5)}, transparent)`,
-                },
-            }}>
-                <Stack direction="row" alignItems="center" spacing={2}>
+            <DialogTitle
+                sx={{
+                    pb: 2,
+                    pt: 2.5,
+                    backgroundColor: '#1a1a1a',
+                    borderBottom: `2px solid ${alpha('#ea4c89', 0.3)}`,
+                }}
+            >
+                <Stack direction="row" alignItems="center" spacing={1.5}>
                     <Box
                         sx={{
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            width: 48,
-                            height: 48,
-                            borderRadius: '12px',
-                            background: `linear-gradient(135deg, ${alpha('#ea4c89', 0.3)}, ${alpha('#f082ac', 0.2)})`,
-                            border: `1.5px solid ${alpha('#ea4c89', 0.4)}`,
-                            boxShadow: `0 4px 12px ${alpha('#ea4c89', 0.2)}, inset 0 1px 0 ${alpha('#fff', 0.1)}`,
-                            transition: 'all 0.3s ease',
-                            '&:hover': {
-                                transform: 'scale(1.05)',
-                                boxShadow: `0 6px 16px ${alpha('#ea4c89', 0.3)}, inset 0 1px 0 ${alpha('#fff', 0.15)}`,
-                            },
+                            width: 40,
+                            height: 40,
+                            borderRadius: '8px',
+                            background: `linear-gradient(135deg, ${alpha('#ea4c89', 0.2)}, ${alpha('#f082ac', 0.1)})`,
+                            border: `1px solid ${alpha('#ea4c89', 0.3)}`,
                         }}
                     >
-                        <TuneIcon sx={{ color: '#ea4c89', fontSize: 26 }} />
+                        <TuneIcon sx={{ color: '#ea4c89', fontSize: 24 }} />
                     </Box>
                     <Stack spacing={0.5}>
-                        <Typography variant="h5" sx={{
-                            color: '#ea4c89',
-                            fontWeight: 700,
-                            lineHeight: 1.2,
-                            textShadow: `0 2px 8px ${alpha('#ea4c89', 0.3)}`,
-                        }}>
+                        <Typography variant="h5" sx={{ color: '#ea4c89', fontWeight: 700, lineHeight: 1.2 }}>
                             {t('modeOne.filters.title')}
                         </Typography>
-                        <Typography variant="caption" sx={{
-                            color: alpha('#fff', 0.7),
-                            fontSize: '0.8rem',
-                            fontWeight: 400,
-                        }}>
+                        <Typography variant="caption" sx={{ color: alpha('#fff', 0.6), fontSize: '0.75rem' }}>
                             Refine your search with powerful filters
                         </Typography>
                     </Stack>
                 </Stack>
             </DialogTitle>
-            <DialogContent dividers sx={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 2.5,
-                background: `linear-gradient(180deg, ${alpha('#121212', 0.98)}, ${alpha('#0f0f0f', 0.98)})`,
-                borderTop: 'none',
-                borderBottom: `1px solid ${alpha('#ea4c89', 0.2)}`,
-                px: 3,
-                py: 3,
-            }}>
+            <DialogContent
+                dividers
+                sx={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 2,
+                    backgroundColor: '#121212',
+                    borderTop: 'none',
+                    borderBottom: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                }}
+            >
+                <TextField
+                    label={t('modeOne.filters.queryLabel')}
+                    value={query}
+                    onChange={(event) => onQueryChange(event.target.value)}
+                    variant="standard"
+                    fullWidth
+                    InputProps={{
+                        endAdornment: (
+                            <InputAdornment position="end">
+                                <SearchIcon fontSize="small" />
+                            </InputAdornment>
+                        ),
+                    }}
+                    autoComplete="off"
+                />
+                <Box
+                    sx={{
+                        backgroundColor: alpha('#ea4c89', 0.05),
+                        border: `1px solid ${alpha('#ea4c89', 0.15)}`,
+                        borderRadius: 2,
+                        p: 2,
+                    }}
+                >
+                    <Stack spacing={1.5}>
+                        <Stack
+                            direction={{ xs: 'column', sm: 'row' }}
+                            spacing={3}
+                            alignItems={{ xs: 'flex-start', sm: 'center' }}
+                        >
+                            <Tooltip
+                                title={liveUpdatesEnabled ? liveUpdatesEnabledHint : liveUpdatesDisabledHint}
+                                arrow
+                                placement="top"
+                            >
+                                <FormControlLabel
+                                    control={
+                                        <Switch
+                                            checked={liveUpdatesEnabled}
+                                            onChange={(_, checked) => onLiveUpdatesEnabledChange(checked)}
+                                            sx={{
+                                                '& .MuiSwitch-switchBase.Mui-checked': {
+                                                    color: '#ea4c89',
+                                                },
+                                                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                                                    backgroundColor: '#ea4c89',
+                                                },
+                                            }}
+                                        />
+                                    }
+                                    label={
+                                        <Stack direction="row" spacing={0.5} alignItems="center">
+                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem' }}>
+                                                {liveUpdatesLabel}
+                                            </Typography>
+                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#fff', 0.5) }} />
+                                        </Stack>
+                                    }
+                                />
+                            </Tooltip>
+                            <Tooltip title="Only show results that match across ALL sources" arrow placement="top">
+                                <FormControlLabel
+                                    control={
+                                        <Switch
+                                            checked={strictOnly}
+                                            onChange={(_, checked) => onStrictOnlyChange(checked)}
+                                            sx={{
+                                                '& .MuiSwitch-switchBase.Mui-checked': {
+                                                    color: '#ea4c89',
+                                                },
+                                                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                                                    backgroundColor: '#ea4c89',
+                                                },
+                                            }}
+                                        />
+                                    }
+                                    label={
+                                        <Stack direction="row" spacing={0.5} alignItems="center">
+                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem' }}>
+                                                {t('modeOne.filters.strictOnly')}
+                                            </Typography>
+                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#fff', 0.5) }} />
+                                        </Stack>
+                                    }
+                                />
+                            </Tooltip>
+                        </Stack>
+                        {!liveUpdatesEnabled && hasPendingChanges && (
+                            <Stack
+                                direction="row"
+                                spacing={1}
+                                alignItems="center"
+                                sx={{
+                                    backgroundColor: alpha('#ff9800', 0.1),
+                                    border: `1px solid ${alpha('#ff9800', 0.3)}`,
+                                    borderRadius: 1,
+                                    p: 1,
+                                }}
+                            >
+                                <Box
+                                    sx={{
+                                        width: 8,
+                                        height: 8,
+                                        borderRadius: '50%',
+                                        backgroundColor: '#ff9800',
+                                        animation: 'pulse 2s infinite',
+                                        '@keyframes pulse': {
+                                            '0%, 100%': { opacity: 1 },
+                                            '50%': { opacity: 0.5 },
+                                        },
+                                    }}
+                                />
+                                <Typography
+                                    variant="caption"
+                                    sx={{
+                                        color: '#ff9800',
+                                        fontWeight: 500,
+                                        fontSize: '0.8rem',
+                                    }}
+                                >
+                                    {liveUpdatesPendingHint}
+                                </Typography>
+                            </Stack>
+                        )}
+                    </Stack>
+                </Box>
+                <Box
+                    sx={{
+                        backgroundColor: alpha('#ea4c89', 0.05),
+                        border: `1px solid ${alpha('#ea4c89', 0.15)}`,
+                        borderRadius: 2,
+                        p: 2,
+                    }}
+                >
+                    <Stack spacing={1.5}>
+                        <Stack direction="row" alignItems="center" spacing={1}>
+                            <SearchIcon sx={{ color: '#ea4c89', fontSize: 20 }} />
+                            <Typography variant="subtitle2" sx={{ color: '#ea4c89', fontWeight: 600 }}>
+                                Quick Tag Search with AI
+                            </Typography>
+                            <Tooltip
+                                title="AI-powered fuzzy matching finds tags even with typos or alternate names"
+                                arrow
+                            >
+                                <HelpOutlineIcon sx={{ fontSize: 16, color: alpha('#ea4c89', 0.5), cursor: 'help' }} />
+                            </Tooltip>
+                        </Stack>
+                        <Stack
+                            direction={{ xs: 'column', sm: 'row' }}
+                            spacing={1.5}
+                            alignItems={{ xs: 'stretch', sm: 'center' }}
+                        >
+                            <TextFieldWrapper
+                                supportColor={tagSupportColor}
+                                isPulsing={isTagBurstVisible && tagSupportCount > 0}
+                            >
+                                <SupportBurst
+                                    supportcolor={tagSupportColor}
+                                    visible={isTagBurstVisible && tagSupportCount > 0}
+                                >
+                                    {tagSupportLabel}
+                                </SupportBurst>
+                                <Autocomplete
+                                    options={displayedTagSuggestions}
+                                    value={tagSearchSelection}
+                                    onOpen={ensureTagSynonymsRequested}
+                                    onChange={(_, newValue) => {
+                                        if (!newValue || typeof newValue === 'string') {
+                                            setTagSearchSelection(null);
+                                            return;
+                                        }
+                                        setTagSearchSelection(newValue);
+                                        setTagSearchValue(newValue.match);
+                                    }}
+                                    inputValue={tagSearchValue}
+                                    onInputChange={(_, newInputValue) => {
+                                        ensureTagSynonymsRequested();
+                                        setTagSearchValue(newInputValue);
+                                    }}
+                                    filterOptions={(options) => options}
+                                    getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
+                                    disablePortal={false}
+                                    autoHighlight
+                                    openOnFocus={tagSearchValue.length > 0}
+                                    PopperProps={{
+                                        style: { zIndex: 1300 },
+                                        placement: 'bottom-start',
+                                        modifiers: [
+                                            {
+                                                name: 'offset',
+                                                options: {
+                                                    offset: [0, 4],
+                                                },
+                                            },
+                                        ],
+                                    }}
+                                    ListboxProps={{
+                                        style: { maxHeight: '300px' },
+                                    }}
+                                    renderOption={(props, option) => (
+                                        <li {...props} key={option.canonical}>
+                                            <Stack spacing={0.5} sx={{ width: '100%' }}>
+                                                <Typography variant="body2">{option.label}</Typography>
+                                                <Typography variant="caption" color="text.secondary">
+                                                    {option.support.length
+                                                        ? 'Available on: ' +
+                                                        option.support
+                                                            .map((source) => MODE_ONE_SOURCE_LABELS[source])
+                                                            .join(', ')
+                                                        : 'Will run as keyword search'}
+                                                </Typography>
+                                            </Stack>
+                                        </li>
+                                    )}
+                                    renderInput={(params) => (
+                                        <TextField
+                                            {...params}
+                                            placeholder={tagSearchPlaceholder}
+                                            variant="standard"
+                                            autoComplete="off"
+                                            onFocus={ensureTagSynonymsRequested}
+                                            onKeyDown={(event) => {
+                                                if (event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    handleTagApply();
+                                                }
+                                            }}
+                                            InputProps={{
+                                                ...params.InputProps,
+                                                endAdornment: (
+                                                    <InputAdornment position="end">
+                                                        <SearchIcon
+                                                            fontSize="small"
+                                                            sx={{ color: alpha(tagSupportColor, 0.7) }}
+                                                        />
+                                                    </InputAdornment>
+                                                ),
+                                            }}
+                                        />
+                                    )}
+                                    isOptionEqualToValue={(option, value) => option.canonical === value?.canonical}
+                                    sx={{
+                                        flex: 1,
+                                        '& .MuiAutocomplete-inputRoot': {
+                                            color: '#fff',
+                                            '& .MuiAutocomplete-input': {
+                                                fontSize: '0.95rem',
+                                            },
+                                        },
+                                        '& .MuiAutocomplete-popupIndicator': {
+                                            color: alpha(tagSupportColor, 0.7),
+                                        },
+                                        '& .MuiAutocomplete-clearIndicator': {
+                                            color: alpha(tagSupportColor, 0.5),
+                                        },
+                                    }}
+                                />
+                                <SupportIndicator supportcolor={tagSupportColor}>{tagSupportLabel}</SupportIndicator>
+                            </TextFieldWrapper>
+                            {allTagSuggestions.length > 5 && (
+                                <Button
+                                    size="small"
+                                    variant="text"
+                                    onClick={() => setShowAllTagSuggestions((expanded) => !expanded)}
+                                    sx={{ alignSelf: { xs: 'flex-end', sm: 'center' } }}
+                                >
+                                    {showAllTagSuggestions ? 'Show fewer matches' : 'Show more matches'}
+                                </Button>
+                            )}
+                            <Button
+                                variant="contained"
+                                size="medium"
+                                onClick={handleTagApply}
+                                disabled={!tagSearchSelection}
+                                sx={{
+                                    alignSelf: { xs: 'stretch', sm: 'flex-start' },
+                                    whiteSpace: 'nowrap',
+                                    backgroundColor: '#ea4c89',
+                                    color: '#fff',
+                                    fontWeight: 600,
+                                    px: 3,
+                                    py: 1,
+                                    '&:hover': {
+                                        backgroundColor: '#f082ac',
+                                    },
+                                    '&:disabled': {
+                                        backgroundColor: alpha('#ea4c89', 0.3),
+                                        color: alpha('#fff', 0.5),
+                                    },
+                                }}
+                            >
+                                {t('global.button.apply')}
+                            </Button>
+                        </Stack>
+                        <Typography
+                            variant="caption"
+                            sx={{
+                                color: tagSearchSelection ? '#4caf50' : alpha('#fff', 0.6),
+                                fontSize: '0.8rem',
+                                fontWeight: tagSearchSelection ? 500 : 400,
+                            }}
+                        >
+                            {tagSearchFeedback}
+                        </Typography>
+                    </Stack>
+                </Box>
                 <Divider sx={{ borderColor: alpha('#ea4c89', 0.1) }} />
                 {!!activeFilterChips.length && (
                     <Box
                         sx={{
-                            background: `linear-gradient(135deg, ${alpha('#4caf50', 0.08)}, ${alpha('#45a049', 0.05)})`,
-                            border: `1.5px solid ${alpha('#4caf50', 0.3)}`,
-                            borderRadius: 3,
-                            p: 2.5,
-                            boxShadow: `0 4px 16px ${alpha('#4caf50', 0.15)}, inset 0 1px 0 ${alpha('#fff', 0.05)}`,
-                            position: 'relative',
-                            overflow: 'hidden',
-                            '&::before': {
-                                content: '""',
-                                position: 'absolute',
-                                top: 0,
-                                left: 0,
-                                right: 0,
-                                height: '2px',
-                                background: `linear-gradient(90deg, transparent, ${alpha('#4caf50', 0.6)}, transparent)`,
-                            },
+                            backgroundColor: alpha('#4caf50', 0.05),
+                            border: `1px solid ${alpha('#4caf50', 0.2)}`,
+                            borderRadius: 2,
+                            p: 2,
                         }}
                     >
                         <Stack spacing={1.5}>
-                            <Stack direction="row" alignItems="center" spacing={1}>
-                                <Box
-                                    sx={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'center',
-                                        minWidth: 28,
-                                        height: 28,
-                                        borderRadius: '50%',
-                                        background: `linear-gradient(135deg, #4caf50, #45a049)`,
-                                        color: '#fff',
-                                        fontSize: '0.8rem',
-                                        fontWeight: 700,
-                                        boxShadow: `0 2px 8px ${alpha('#4caf50', 0.4)}, inset 0 1px 0 ${alpha('#fff', 0.2)}`,
-                                        border: `1px solid ${alpha('#fff', 0.1)}`,
-                                    }}
-                                >
-                                    {activeFilterChips.length}
-                                </Box>
-                                <Typography variant="subtitle2" sx={{
-                                    color: '#4caf50',
-                                    fontWeight: 600,
-                                    textShadow: `0 1px 3px ${alpha('#4caf50', 0.3)}`,
-                                }}>
-                                    {t('modeOne.filters.active')}
-                                </Typography>
+                            <Stack direction="row" alignItems="center" spacing={1} justifyContent="space-between">
+                                <Stack direction="row" alignItems="center" spacing={1}>
+                                    <Box
+                                        sx={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            minWidth: 24,
+                                            height: 24,
+                                            borderRadius: '50%',
+                                            backgroundColor: '#4caf50',
+                                            color: '#fff',
+                                            fontSize: '0.75rem',
+                                            fontWeight: 700,
+                                        }}
+                                    >
+                                        {activeFilterChips.length}
+                                    </Box>
+                                    <Typography variant="subtitle2" sx={{ color: '#4caf50', fontWeight: 600 }}>
+                                        {t('modeOne.filters.active')}
+                                    </Typography>
+                                </Stack>
+                                {activeTags.length > 0 && (
+                                    <Button
+                                        size="small"
+                                        variant="outlined"
+                                        onClick={handleGetRecommendations}
+                                        disabled={isLoadingRecommendations}
+                                        sx={{
+                                            borderColor: alpha('#ea4c89', 0.5),
+                                            color: '#ea4c89',
+                                            fontSize: '0.75rem',
+                                            textTransform: 'none',
+                                            px: 1.5,
+                                            '&:hover': {
+                                                borderColor: '#ea4c89',
+                                                backgroundColor: alpha('#ea4c89', 0.1),
+                                            },
+                                            '&:disabled': {
+                                                borderColor: alpha('#ea4c89', 0.2),
+                                                color: alpha('#ea4c89', 0.5),
+                                            },
+                                        }}
+                                    >
+                                        {isLoadingRecommendations ? 'Loading...' : 'Recommend Tags'}
+                                    </Button>
+                                )}
                             </Stack>
                             <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
                                 {activeFilterChips.map((chip) => (
                                     <Chip
                                         key={chip.key}
                                         label={chip.label}
-                                        onDelete={() => {
-                                            // For tag filters with multiple tags, remove the specific tag
-                                            if (chip.filterKey && chip.tagIndex !== undefined && chip.canonicalTag) {
-                                                const currentSelection = selection[chip.filterKey];
-                                                if (currentSelection?.type === 'text' && currentSelection.value) {
-                                                    const tags = currentSelection.value.split(',').map(t => t.trim()).filter(Boolean);
-                                                    const updatedTags = tags.filter((_, idx) => idx !== chip.tagIndex);
-
-                                                    // Update display values too
-                                                    if (tagDisplayValues[chip.filterKey]) {
-                                                        const displayTags = tagDisplayValues[chip.filterKey].split(',').map(t => t.trim()).filter(Boolean);
-                                                        const updatedDisplayTags = displayTags.filter((_, idx) => idx !== chip.tagIndex);
-                                                        setTagDisplayValues(prev => {
-                                                            const next = { ...prev };
-                                                            if (updatedDisplayTags.length > 0) {
-                                                                next[chip.filterKey!] = updatedDisplayTags.join(',');
-                                                            } else {
-                                                                delete next[chip.filterKey!];
-                                                            }
-                                                            return next;
-                                                        });
-                                                    }
-
-                                                    // Update selection
-                                                    onSelectionChange(
-                                                        chip.filterKey,
-                                                        updatedTags.length > 0
-                                                            ? { type: 'text', value: updatedTags.join(',') }
-                                                            : null
-                                                    );
-                                                }
-                                            } else {
-                                                // For non-tag filters or single tag, clear the entire filter
-                                                onSelectionChange(chip.key, null);
-                                            }
-                                        }}
+                                        onDelete={chip.onDelete}
                                         size="small"
                                         sx={{
-                                            background: `linear-gradient(135deg, ${alpha('#4caf50', 0.2)}, ${alpha('#45a049', 0.15)})`,
+                                            backgroundColor: alpha('#4caf50', 0.15),
                                             color: '#fff',
-                                            border: `1px solid ${alpha('#4caf50', 0.4)}`,
+                                            border: `1px solid ${alpha('#4caf50', 0.3)}`,
                                             fontWeight: 500,
-                                            boxShadow: `0 2px 6px ${alpha('#4caf50', 0.2)}`,
-                                            transition: 'all 0.2s ease',
-                                            '&:hover': {
-                                                transform: 'translateY(-1px)',
-                                                boxShadow: `0 4px 10px ${alpha('#4caf50', 0.3)}`,
-                                                background: `linear-gradient(135deg, ${alpha('#4caf50', 0.25)}, ${alpha('#45a049', 0.2)})`,
+                                            fontSize: '0.85rem',
+                                            '& .MuiChip-label': {
+                                                paddingLeft: '10px',
+                                                paddingRight: '6px',
                                             },
                                             '& .MuiChip-deleteIcon': {
-                                                color: alpha('#4caf50', 0.8),
-                                                transition: 'all 0.2s ease',
+                                                color: alpha('#4caf50', 0.7),
+                                                fontSize: '18px',
                                                 '&:hover': {
                                                     color: '#4caf50',
-                                                    transform: 'scale(1.1)',
                                                 },
+                                            },
+                                            '&:hover': {
+                                                backgroundColor: alpha('#4caf50', 0.2),
+                                                borderColor: alpha('#4caf50', 0.5),
                                             },
                                         }}
                                     />
@@ -2112,48 +2041,25 @@ export const ModeOneFilterPanel = ({
                                 expanded={expandedCommon}
                                 onChange={() => setExpandedCommon(!expandedCommon)}
                                 sx={{
-                                    background: `linear-gradient(135deg, ${alpha('#1a1a1a', 0.95)}, ${alpha('#2a1a2a', 0.95)})`,
+                                    backgroundColor: '#1a1a1a',
                                     backgroundImage: 'none',
-                                    border: `1.5px solid ${alpha('#ea4c89', 0.25)}`,
-                                    borderRadius: 2,
+                                    border: `1px solid ${alpha('#ea4c89', 0.2)}`,
                                     '&:before': { display: 'none' },
-                                    boxShadow: `0 4px 16px ${alpha('#ea4c89', 0.15)}, inset 0 1px 0 ${alpha('#fff', 0.05)}`,
-                                    transition: 'all 0.3s ease',
-                                    '&:hover': {
-                                        boxShadow: `0 6px 20px ${alpha('#ea4c89', 0.2)}, inset 0 1px 0 ${alpha('#fff', 0.08)}`,
-                                        borderColor: alpha('#ea4c89', 0.35),
-                                    },
+                                    boxShadow: `0 2px 8px ${alpha('#ea4c89', 0.1)}`,
                                 }}
                             >
                                 <AccordionSummary
-                                    expandIcon={<ExpandMoreIcon sx={{
-                                        color: '#ea4c89',
-                                        transition: 'transform 0.3s ease',
-                                        transform: expandedCommon ? 'rotate(180deg)' : 'rotate(0deg)',
-                                    }} />}
+                                    expandIcon={<ExpandMoreIcon sx={{ color: '#ea4c89' }} />}
                                     sx={{
-                                        background: expandedCommon
-                                            ? `linear-gradient(135deg, ${alpha('#ea4c89', 0.08)}, ${alpha('#f082ac', 0.05)})`
-                                            : 'transparent',
-                                        borderBottom: expandedCommon ? `1.5px solid ${alpha('#ea4c89', 0.25)}` : 'none',
-                                        borderRadius: expandedCommon ? '8px 8px 0 0' : '8px',
-                                        transition: 'all 0.3s ease',
+                                        backgroundColor: '#1a1a1a',
+                                        borderBottom: expandedCommon ? `1px solid ${alpha('#ea4c89', 0.2)}` : 'none',
                                         '& .MuiAccordionSummary-content': {
-                                            margin: '14px 0',
-                                        },
-                                        '&:hover': {
-                                            background: expandedCommon
-                                                ? `linear-gradient(135deg, ${alpha('#ea4c89', 0.12)}, ${alpha('#f082ac', 0.08)})`
-                                                : alpha('#ea4c89', 0.05),
+                                            margin: '12px 0',
                                         },
                                     }}
                                 >
                                     <Stack direction="row" alignItems="center" spacing={1.5} sx={{ width: '100%' }}>
-                                        <Typography variant="h6" sx={{
-                                            color: '#ea4c89',
-                                            fontWeight: 600,
-                                            textShadow: `0 1px 3px ${alpha('#ea4c89', 0.2)}`,
-                                        }}>
+                                        <Typography variant="h6" sx={{ color: '#ea4c89', fontWeight: 600 }}>
                                             Common Filters
                                         </Typography>
                                         {commonActiveCount > 0 && (
@@ -2161,24 +2067,18 @@ export const ModeOneFilterPanel = ({
                                                 label={`${commonActiveCount} active`}
                                                 size="small"
                                                 sx={{
-                                                    background: `linear-gradient(135deg, #4caf50, #45a049)`,
+                                                    backgroundColor: '#4caf50',
                                                     color: '#fff',
                                                     fontWeight: 600,
                                                     fontSize: '0.7rem',
-                                                    height: 24,
-                                                    boxShadow: `0 2px 6px ${alpha('#4caf50', 0.3)}`,
-                                                    border: `1px solid ${alpha('#fff', 0.1)}`,
+                                                    height: 22,
                                                 }}
                                             />
                                         )}
                                     </Stack>
                                 </AccordionSummary>
-                                <AccordionDetails sx={{
-                                    background: `linear-gradient(180deg, ${alpha('#121212', 0.98)}, ${alpha('#0f0f0f', 0.98)})`,
-                                    p: 2.5,
-                                    borderRadius: '0 0 8px 8px',
-                                }}>
-                                    <Stack spacing={2}>
+                                <AccordionDetails sx={{ backgroundColor: '#121212', p: 2 }}>
+                                    <Stack spacing={1.5}>
                                         {commonFilters.map((filter) => renderFilterControl(filter))}
                                     </Stack>
                                 </AccordionDetails>
@@ -2191,48 +2091,25 @@ export const ModeOneFilterPanel = ({
                                 expanded={expandedAdvanced}
                                 onChange={() => setExpandedAdvanced(!expandedAdvanced)}
                                 sx={{
-                                    background: `linear-gradient(135deg, ${alpha('#1a1a1a', 0.95)}, ${alpha('#2a1a2a', 0.95)})`,
+                                    backgroundColor: '#1a1a1a',
                                     backgroundImage: 'none',
-                                    border: `1.5px solid ${alpha('#ea4c89', 0.25)}`,
-                                    borderRadius: 2,
+                                    border: `1px solid ${alpha('#ea4c89', 0.2)}`,
                                     '&:before': { display: 'none' },
-                                    boxShadow: `0 4px 16px ${alpha('#ea4c89', 0.15)}, inset 0 1px 0 ${alpha('#fff', 0.05)}`,
-                                    transition: 'all 0.3s ease',
-                                    '&:hover': {
-                                        boxShadow: `0 6px 20px ${alpha('#ea4c89', 0.2)}, inset 0 1px 0 ${alpha('#fff', 0.08)}`,
-                                        borderColor: alpha('#ea4c89', 0.35),
-                                    },
+                                    boxShadow: `0 2px 8px ${alpha('#ea4c89', 0.1)}`,
                                 }}
                             >
                                 <AccordionSummary
-                                    expandIcon={<ExpandMoreIcon sx={{
-                                        color: '#ea4c89',
-                                        transition: 'transform 0.3s ease',
-                                        transform: expandedAdvanced ? 'rotate(180deg)' : 'rotate(0deg)',
-                                    }} />}
+                                    expandIcon={<ExpandMoreIcon sx={{ color: '#ea4c89' }} />}
                                     sx={{
-                                        background: expandedAdvanced
-                                            ? `linear-gradient(135deg, ${alpha('#ea4c89', 0.08)}, ${alpha('#f082ac', 0.05)})`
-                                            : 'transparent',
-                                        borderBottom: expandedAdvanced ? `1.5px solid ${alpha('#ea4c89', 0.25)}` : 'none',
-                                        borderRadius: expandedAdvanced ? '8px 8px 0 0' : '8px',
-                                        transition: 'all 0.3s ease',
+                                        backgroundColor: '#1a1a1a',
+                                        borderBottom: expandedAdvanced ? `1px solid ${alpha('#ea4c89', 0.2)}` : 'none',
                                         '& .MuiAccordionSummary-content': {
-                                            margin: '14px 0',
-                                        },
-                                        '&:hover': {
-                                            background: expandedAdvanced
-                                                ? `linear-gradient(135deg, ${alpha('#ea4c89', 0.12)}, ${alpha('#f082ac', 0.08)})`
-                                                : alpha('#ea4c89', 0.05),
+                                            margin: '12px 0',
                                         },
                                     }}
                                 >
                                     <Stack direction="row" alignItems="center" spacing={1.5} sx={{ width: '100%' }}>
-                                        <Typography variant="h6" sx={{
-                                            color: '#ea4c89',
-                                            fontWeight: 600,
-                                            textShadow: `0 1px 3px ${alpha('#ea4c89', 0.2)}`,
-                                        }}>
+                                        <Typography variant="h6" sx={{ color: '#ea4c89', fontWeight: 600 }}>
                                             Advanced Filters
                                         </Typography>
                                         {advancedActiveCount > 0 && (
@@ -2240,24 +2117,18 @@ export const ModeOneFilterPanel = ({
                                                 label={`${advancedActiveCount} active`}
                                                 size="small"
                                                 sx={{
-                                                    background: `linear-gradient(135deg, #4caf50, #45a049)`,
+                                                    backgroundColor: '#4caf50',
                                                     color: '#fff',
                                                     fontWeight: 600,
                                                     fontSize: '0.7rem',
-                                                    height: 24,
-                                                    boxShadow: `0 2px 6px ${alpha('#4caf50', 0.3)}`,
-                                                    border: `1px solid ${alpha('#fff', 0.1)}`,
+                                                    height: 22,
                                                 }}
                                             />
                                         )}
                                     </Stack>
                                 </AccordionSummary>
-                                <AccordionDetails sx={{
-                                    background: `linear-gradient(180deg, ${alpha('#121212', 0.98)}, ${alpha('#0f0f0f', 0.98)})`,
-                                    p: 2.5,
-                                    borderRadius: '0 0 8px 8px',
-                                }}>
-                                    <Stack spacing={2}>
+                                <AccordionDetails sx={{ backgroundColor: '#121212', p: 2 }}>
+                                    <Stack spacing={1.5}>
                                         {advancedFilters.map((filter) => renderFilterControl(filter))}
                                     </Stack>
                                 </AccordionDetails>
@@ -2270,14 +2141,15 @@ export const ModeOneFilterPanel = ({
                     </Typography>
                 )}
             </DialogContent>
-            <DialogActions sx={{
-                px: 3,
-                py: 3,
-                background: `linear-gradient(135deg, ${alpha('#1a1a1a', 0.95)}, ${alpha('#2a1a2a', 0.95)})`,
-                borderTop: `2px solid ${alpha('#ea4c89', 0.3)}`,
-                gap: 1.5,
-                boxShadow: `0 -4px 20px ${alpha('#ea4c89', 0.1)}`,
-            }}>
+            <DialogActions
+                sx={{
+                    px: 3,
+                    py: 2.5,
+                    backgroundColor: '#1a1a1a',
+                    borderTop: `2px solid ${alpha('#ea4c89', 0.3)}`,
+                    gap: 1.5,
+                }}
+            >
                 <Tooltip title="Clear all active filters" arrow>
                     <span>
                         <Button
@@ -2287,22 +2159,16 @@ export const ModeOneFilterPanel = ({
                             sx={{
                                 color: '#ea4c89',
                                 borderColor: alpha('#ea4c89', 0.5),
-                                borderWidth: '1.5px',
                                 fontWeight: 600,
-                                px: 3,
-                                py: 1,
-                                borderRadius: 2,
-                                transition: 'all 0.3s ease',
+                                px: 2.5,
                                 '&:hover': {
                                     borderColor: '#ea4c89',
-                                    backgroundColor: alpha('#ea4c89', 0.12),
-                                    boxShadow: `0 4px 12px ${alpha('#ea4c89', 0.25)}`,
-                                    transform: 'translateY(-1px)',
+                                    backgroundColor: alpha('#ea4c89', 0.08),
                                 },
                                 '&:disabled': {
                                     borderColor: alpha('#ea4c89', 0.2),
                                     color: alpha('#ea4c89', 0.3),
-                                }
+                                },
                             }}
                         >
                             {t('modeOne.filters.reset')}
@@ -2314,29 +2180,19 @@ export const ModeOneFilterPanel = ({
                     onClick={onClose}
                     variant="outlined"
                     sx={{
-                        color: alpha('#fff', 0.7),
-                        borderColor: alpha('#fff', 0.2),
-                        borderWidth: '1.5px',
+                        color: '#999',
+                        borderColor: alpha('#999', 0.3),
                         fontWeight: 500,
-                        px: 3,
-                        py: 1,
-                        borderRadius: 2,
-                        transition: 'all 0.3s ease',
+                        px: 2.5,
                         '&:hover': {
-                            borderColor: alpha('#fff', 0.4),
-                            backgroundColor: alpha('#fff', 0.08),
-                            color: '#fff',
-                            boxShadow: `0 4px 12px ${alpha('#fff', 0.15)}`,
-                            transform: 'translateY(-1px)',
-                        }
+                            borderColor: '#999',
+                            backgroundColor: alpha('#999', 0.08),
+                        },
                     }}
                 >
                     {t('global.button.cancel')}
                 </Button>
-                <Tooltip
-                    title={liveUpdatesEnabled ? "Filters are already applied" : "Apply changes and close"}
-                    arrow
-                >
+                <Tooltip title={liveUpdatesEnabled ? 'Filters are already applied' : 'Apply changes and close'} arrow>
                     <span>
                         <Button
                             onClick={() => {
@@ -2346,20 +2202,17 @@ export const ModeOneFilterPanel = ({
                             variant="contained"
                             disabled={!liveUpdatesEnabled && !hasPendingChanges}
                             sx={{
-                                background: `linear-gradient(135deg, #ea4c89, #f082ac)`,
+                                backgroundColor: '#ea4c89',
                                 color: '#fff',
                                 fontWeight: 700,
                                 fontSize: '0.95rem',
                                 px: 4,
-                                py: 1.2,
-                                borderRadius: 2,
-                                boxShadow: `0 4px 16px ${alpha('#ea4c89', 0.4)}, inset 0 1px 0 ${alpha('#fff', 0.2)}`,
-                                border: `1px solid ${alpha('#fff', 0.1)}`,
-                                transition: 'all 0.3s ease',
+                                py: 1,
+                                boxShadow: `0 4px 12px ${alpha('#ea4c89', 0.3)}`,
                                 '&:hover': {
-                                    background: `linear-gradient(135deg, #f082ac, #ff4590)`,
-                                    boxShadow: `0 6px 20px ${alpha('#ea4c89', 0.5)}, inset 0 1px 0 ${alpha('#fff', 0.25)}`,
-                                    transform: 'translateY(-2px)',
+                                    backgroundColor: '#f082ac',
+                                    boxShadow: `0 6px 16px ${alpha('#ea4c89', 0.4)}`,
+                                    transform: 'translateY(-1px)',
                                 },
                                 '&:active': {
                                     transform: 'translateY(0)',
@@ -2369,6 +2222,7 @@ export const ModeOneFilterPanel = ({
                                     color: alpha('#fff', 0.5),
                                     boxShadow: 'none',
                                 },
+                                transition: 'all 0.2s ease',
                             }}
                         >
                             {t('global.button.apply')}
@@ -2376,7 +2230,166 @@ export const ModeOneFilterPanel = ({
                     </span>
                 </Tooltip>
             </DialogActions>
+
+            {/* Recommendations Dialog */}
+            <Dialog
+                open={recommendationsOpen}
+                onClose={() => setRecommendationsOpen(false)}
+                maxWidth="sm"
+                fullWidth
+                PaperProps={{
+                    sx: {
+                        backgroundColor: '#121212',
+                        backgroundImage: 'none',
+                        border: `2px solid ${alpha('#ea4c89', 0.3)}`,
+                        boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.2)}`,
+                    },
+                }}
+            >
+                <DialogTitle
+                    sx={{
+                        pb: 2,
+                        pt: 2.5,
+                        backgroundColor: '#1a1a1a',
+                        borderBottom: `2px solid ${alpha('#ea4c89', 0.3)}`,
+                    }}
+                >
+                    <Stack direction="row" alignItems="center" spacing={1.5}>
+                        <Box
+                            sx={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: 40,
+                                height: 40,
+                                borderRadius: '8px',
+                                background: `linear-gradient(135deg, ${alpha('#ea4c89', 0.2)}, ${alpha('#f082ac', 0.1)})`,
+                                border: `1px solid ${alpha('#ea4c89', 0.3)}`,
+                            }}
+                        >
+                            <SearchIcon sx={{ color: '#ea4c89', fontSize: 24 }} />
+                        </Box>
+                        <Stack spacing={0.5}>
+                            <Typography variant="h5" sx={{ color: '#ea4c89', fontWeight: 700, lineHeight: 1.2 }}>
+                                Recommended Tags
+                            </Typography>
+                            <Typography variant="caption" sx={{ color: alpha('#fff', 0.6), fontSize: '0.75rem' }}>
+                                Based on your active tags: {activeTags.join(', ')}
+                            </Typography>
+                        </Stack>
+                    </Stack>
+                </DialogTitle>
+                <DialogContent
+                    sx={{
+                        backgroundColor: '#121212',
+                        pt: 3,
+                    }}
+                >
+                    {isLoadingRecommendations ? (
+                        <Box sx={{ textAlign: 'center', py: 4 }}>
+                            <Typography variant="body2" sx={{ color: alpha('#fff', 0.7) }}>
+                                Finding recommendations...
+                            </Typography>
+                        </Box>
+                    ) : recommendedTags.length === 0 ? (
+                        <Box sx={{ textAlign: 'center', py: 4 }}>
+                            <Typography variant="body2" sx={{ color: alpha('#fff', 0.7) }}>
+                                No recommendations found
+                            </Typography>
+                        </Box>
+                    ) : (
+                        <Stack spacing={1} direction="row" useFlexGap flexWrap="wrap">
+                            {recommendedTags.map((tag) => {
+                                // Determine target filter based on tag or use first available tag filter
+                                let targetFilter = aggregatedFilters.find(f => {
+                                    const labelLower = f.label.toLowerCase();
+                                    // Check if tag has gender prefix
+                                    if (tag.toLowerCase().startsWith('female:')) {
+                                        return labelLower.includes('female') && (TAG_FILTER_LABEL_PATTERN.test(f.label) || isGenderTagFilter(f.label));
+                                    } else if (tag.toLowerCase().startsWith('male:')) {
+                                        return labelLower.includes('male') && (TAG_FILTER_LABEL_PATTERN.test(f.label) || isGenderTagFilter(f.label));
+                                    }
+                                    // If no prefix, find first tag filter
+                                    return TAG_FILTER_LABEL_PATTERN.test(f.label) || isGenderTagFilter(f.label);
+                                });
+
+                                if (!targetFilter) return null;
+
+                                const currentValue = selection[targetFilter.key]?.type === 'text' ? selection[targetFilter.key].value : '';
+                                const existingTags = currentValue ? currentValue.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) : [];
+
+                                // Clean tag (remove gender prefix)
+                                const cleanTag = tag.replace(/^(?:male|female):\s*/i, '').trim();
+                                const isAlreadyAdded = existingTags.some(existing =>
+                                    existing === cleanTag.toLowerCase() ||
+                                    existing.includes(cleanTag.toLowerCase()) ||
+                                    cleanTag.toLowerCase().includes(existing)
+                                );
+
+                                return (
+                                    <Chip
+                                        key={tag}
+                                        label={tag}
+                                        onClick={() => {
+                                            if (isAlreadyAdded) {
+                                                return; // Already added
+                                            }
+                                            const newValue = currentValue && currentValue.trim()
+                                                ? `${currentValue},${cleanTag}`
+                                                : cleanTag;
+                                            onSelectionChange(targetFilter!.key, {
+                                                type: 'text',
+                                                value: newValue,
+                                            });
+                                        }}
+                                        sx={{
+                                            backgroundColor: isAlreadyAdded
+                                                ? alpha('#4caf50', 0.15)
+                                                : alpha('#ea4c89', 0.15),
+                                            color: '#fff',
+                                            border: `1px solid ${isAlreadyAdded
+                                                ? alpha('#4caf50', 0.3)
+                                                : alpha('#ea4c89', 0.3)}`,
+                                            cursor: isAlreadyAdded ? 'default' : 'pointer',
+                                            '&:hover': {
+                                                backgroundColor: isAlreadyAdded
+                                                    ? alpha('#4caf50', 0.15)
+                                                    : alpha('#ea4c89', 0.25),
+                                                borderColor: isAlreadyAdded ? alpha('#4caf50', 0.3) : '#ea4c89',
+                                            },
+                                        }}
+                                    />
+                                );
+                            })}
+                        </Stack>
+                    )}
+                </DialogContent>
+                <DialogActions
+                    sx={{
+                        backgroundColor: '#1a1a1a',
+                        borderTop: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                        px: 3,
+                        py: 2,
+                    }}
+                >
+                    <Button
+                        onClick={() => setRecommendationsOpen(false)}
+                        variant="outlined"
+                        sx={{
+                            color: '#999',
+                            borderColor: alpha('#999', 0.3),
+                            fontWeight: 500,
+                            px: 2.5,
+                            '&:hover': {
+                                borderColor: '#999',
+                                backgroundColor: alpha('#999', 0.08),
+                            },
+                        }}
+                    >
+                        Close
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </Dialog>
     );
 };
-

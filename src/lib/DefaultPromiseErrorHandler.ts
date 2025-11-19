@@ -11,6 +11,15 @@ export const defaultPromiseErrorHandler = (name: string) => (error: any) => {
         return;
     }
 
+    // Suppress expected abort errors - these are normal when requests are cancelled
+    // (e.g., component unmounts, navigation, or new requests replacing old ones)
+    if (error?.name === 'AbortError' || 
+        error?.message?.includes('aborted') || 
+        error?.message?.includes('signal is aborted')) {
+        // These are expected and not real errors, so we can silently ignore them
+        return;
+    }
+
     // eslint-disable-next-line no-console
     console.error(`${name} failed due to`, error);
 };

@@ -71,13 +71,17 @@ export const WebUIUpdateChecker = () => {
     const isSameAsCurrent = !newVersion || !webUIVersion || webUIVersion === newVersion;
 
     const saveInitialVersion = !webUIVersion && !!newVersion;
-    if (saveInitialVersion) {
-        setWebUIVersion(newVersion);
-    }
+    useEffect(() => {
+        if (saveInitialVersion && newVersion) {
+            setWebUIVersion(newVersion);
+        }
+    }, [saveInitialVersion, newVersion, setWebUIVersion]);
 
-    if (!isSameAsCurrent && !open) {
-        setOpen(true);
-    }
+    useEffect(() => {
+        if (!isSameAsCurrent && !open) {
+            setOpen(true);
+        }
+    }, [isSameAsCurrent, open]);
 
     useEffect(() => {
         const isError = webUIUpdateState === UpdateState.Error;

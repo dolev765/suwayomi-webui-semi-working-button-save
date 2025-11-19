@@ -1,3 +1,5 @@
+import { stripGenderTagPrefix } from '@/lib/HelperFunctions.ts';
+
 /**
  * Progressive Tag Search Utilities
  * 
@@ -57,6 +59,13 @@ export function generateTagCombinations(tags: string[], size: number): TagCombin
 }
 
 /**
+ * Clean tag by removing category prefixes (e.g., "female:tag" -> "tag")
+ */
+function cleanTag(tag: string): string {
+    return stripGenderTagPrefix(tag);
+}
+
+/**
  * Generate all tag combinations in progressive order (largest to smallest)
  */
 export function generateProgressiveTagCombinations(tags: string[]): TagCombination[] {
@@ -64,11 +73,14 @@ export function generateProgressiveTagCombinations(tags: string[]): TagCombinati
         return [];
     }
 
+    // Clean all tags before generating combinations to prevent GraphQL errors
+    const cleanedTags = tags.map(cleanTag).filter(Boolean);
+
     const allCombinations: TagCombination[] = [];
 
     // Start with all tags, then progressively reduce
-    for (let size = tags.length; size >= 1; size--) {
-        const combinations = generateTagCombinations(tags, size);
+    for (let size = cleanedTags.length; size >= 1; size--) {
+        const combinations = generateTagCombinations(cleanedTags, size);
         allCombinations.push(...combinations);
     }
 
@@ -103,9 +115,8 @@ export function createOmittedTagsWarning(omittedTags: string[]): string {
     }
 
     if (omittedTags.length === 1) {
-        return `Missing tag: ${omittedTags[0]}`;
+        return `Tag not available: ${omittedTags[0]}`;
     }
 
-    return `Missing tags: ${omittedTags.join(', ')}`;
+    return `Tags not available: ${omittedTags.join(', ')}`;
 }
-

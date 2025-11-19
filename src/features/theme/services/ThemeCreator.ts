@@ -22,7 +22,8 @@ import { deepmerge } from '@mui/utils';
 // eslint-disable-next-line no-restricted-imports
 import { PaletteBackgroundChannel } from '@mui/material/styles/createThemeWithVars';
 import { Palette } from '@vibrant/color';
-import { TAppThemeContext, ThemeMode } from '@/features/theme/AppThemeContext.tsx';
+import { TAppThemeContext } from '@/features/theme/AppThemeContext.tsx';
+import { ThemeMode } from '@/features/theme/ThemeMode.ts';
 import { MediaQuery } from '@/base/utils/MediaQuery.tsx';
 import { AppTheme, loadThemeFonts } from '@/features/theme/services/AppThemes.ts';
 import { defaultPromiseErrorHandler } from '@/lib/DefaultPromiseErrorHandler.ts';

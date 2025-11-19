@@ -10,7 +10,7 @@ import useMediaQuery from '@mui/material/useMediaQuery';
 import { Breakpoint, SxProps, Theme } from '@mui/material/styles';
 import { useCallback, useState } from 'react';
 import { getCurrentTheme } from '@/features/theme/services/ThemeCreator.ts';
-import { ThemeMode } from '@/features/theme/AppThemeContext.tsx';
+import { ThemeMode } from '@/features/theme/ThemeMode.ts';
 import { useResizeObserver } from '@/base/hooks/useResizeObserver.tsx';
 
 export class MediaQuery {
@@ -126,7 +126,7 @@ export class MediaQuery {
     static preventMobileContextMenuSx(): SxProps<Theme> {
         return {
             userSelect: 'none',
-            '-webkit-touch-callout': 'none',
+            WebkitTouchCallout: 'none',
         };
     }
 }

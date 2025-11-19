@@ -7,7 +7,7 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
@@ -66,13 +66,17 @@ export const ServerUpdateChecker = () => {
     const isSameAsCurrent = !version || !serverVersion || serverVersion === version;
 
     const saveInitialVersion = !serverVersion && !!version;
-    if (saveInitialVersion) {
-        setServerVersion(version);
-    }
+    useEffect(() => {
+        if (saveInitialVersion && version) {
+            setServerVersion(version);
+        }
+    }, [saveInitialVersion, version, setServerVersion]);
 
-    if (!isSameAsCurrent && !open) {
-        setOpen(true);
-    }
+    useEffect(() => {
+        if (!isSameAsCurrent && !open) {
+            setOpen(true);
+        }
+    }, [isSameAsCurrent, open]);
 
     if (isCheckingForServerUpdate) {
         return null;

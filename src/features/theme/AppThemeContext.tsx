@@ -25,12 +25,7 @@ import { getErrorMessage } from '@/lib/HelperFunctions.ts';
 import { createAndSetTheme } from '@/features/theme/services/ThemeCreator.ts';
 import { AppStorage } from '@/lib/storage/AppStorage.ts';
 import { DIRECTION_TO_CACHE } from '@/features/theme/ThemeDirectionCache.ts';
-
-export enum ThemeMode {
-    SYSTEM = 'system',
-    DARK = 'dark',
-    LIGHT = 'light',
-}
+import { ThemeMode } from '@/features/theme/ThemeMode.ts';
 
 export type TAppThemeContext = {
     appTheme: AppThemes;

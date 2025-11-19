@@ -38,6 +38,21 @@ export const coerceIn = (value: number, min: number, max: number): number => Mat
 
 export const noOp = () => {};
 
+const GENDER_PREFIX_KEYWORDS = '(?:male|female)(?:\\s+(?:tags?|tag|categories?|category|characters?|character))?';
+const LEADING_GENDER_PREFIX_REGEX = new RegExp(`^\\s*${GENDER_PREFIX_KEYWORDS}\\s*[:\\-_]\\s*`, 'i');
+const INLINE_GENDER_PREFIX_REGEX = new RegExp(`\\b${GENDER_PREFIX_KEYWORDS}\\s*[:\\-_]\\s*`, 'gi');
+
+export const stripGenderTagPrefix = (value?: string | null): string => {
+    if (!value) {
+        return '';
+    }
+
+    return value
+        .replace(LEADING_GENDER_PREFIX_REGEX, '')
+        .replace(INLINE_GENDER_PREFIX_REGEX, '')
+        .trim();
+};
+
 const GRAPHQL_EXCEPTION_MESSAGE_REGEX = /(.*Exception while fetching data \(.*\) : .*)\r\n\r\n(.*)/s;
 export const extractGraphqlExceptionInfo = (
     error: ReactNode | string,

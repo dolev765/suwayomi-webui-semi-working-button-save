@@ -10,7 +10,7 @@
 import { jsonSaveParse } from '@/lib/HelperFunctions.ts';
 
 export class Storage {
-    constructor(private readonly storage: typeof window.localStorage) {}
+    constructor(private readonly storage: typeof window.localStorage) { }
 
     parseValue<T>(value: string | null, defaultValue: T): T {
         if (value === null) {
@@ -36,13 +36,16 @@ export class Storage {
                 return;
             }
 
-            window.dispatchEvent(
-                new StorageEvent('storage', {
-                    key,
-                    oldValue: currentValue,
-                    newValue: valueToStore,
-                }),
-            );
+            // Defer event dispatch to avoid setState during render warnings
+            queueMicrotask(() => {
+                window.dispatchEvent(
+                    new StorageEvent('storage', {
+                        key,
+                        oldValue: currentValue,
+                        newValue: valueToStore,
+                    }),
+                );
+            });
         };
 
         if (value === undefined) {

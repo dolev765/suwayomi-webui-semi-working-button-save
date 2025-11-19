@@ -13,9 +13,13 @@ import {
 } from '@/features/mode-one/ModeOne.types.ts';
 import { IPos, SourceFilters } from '@/features/source/Source.types.ts';
 import { SourceListFieldsFragment, TriState } from '@/lib/graphql/generated/graphql.ts';
+import { stripGenderTagPrefix } from '@/lib/HelperFunctions.ts';
 
 import { QUERY_FALLBACK_SOURCES, SyntheticTagDefinition } from './constants.ts';
 import { generateProgressiveTagCombinations } from './progressiveTagSearch.ts';
+
+// Sources that don't accept gender prefixes in tag queries
+export const SOURCES_WITHOUT_GENDER_PREFIX: Set<ModeOneSourceKey> = new Set(['imhentai', 'hentaiera']);
 
 const normalize = (value?: string | null) => value?.toLowerCase().replace(/[^a-z0-9]/g, '') ?? '';
 
@@ -472,15 +476,69 @@ export const buildFilterPayloads = (
         warningSets[sourceKey].add(message);
     };
 
+    /**
+     * Clean tag by removing gender prefixes (e.g., "female:tag" -> "tag")
+     * This is needed for sources that don't accept gender prefixes
+     */
+    const cleanTagForSource = (tag: string, sourceKey: ModeOneSourceKey): string => {
+        if (!SOURCES_WITHOUT_GENDER_PREFIX.has(sourceKey)) {
+            return tag; // Keep original for sources that support gender prefixes
+        }
+        // Remove gender prefixes for sources that don't support them
+        return stripGenderTagPrefix(tag);
+    };
+
     const addQueryFragment = (sourceKey: ModeOneSourceKey, fragment: string | null | undefined) => {
         const trimmed = fragment?.trim();
         if (!trimmed) {
             return;
         }
-        const payload = payloads[sourceKey];
-        if (!payload.queryFragments.includes(trimmed)) {
-            payload.queryFragments.push(trimmed);
+        // Clean the fragment for sources that don't accept gender prefixes
+        const cleaned = cleanTagForSource(trimmed, sourceKey);
+        if (!cleaned) {
+            return;
         }
+        const payload = payloads[sourceKey];
+        if (!payload.queryFragments.includes(cleaned)) {
+            payload.queryFragments.push(cleaned);
+        }
+    };
+
+    const applyTagFragmentsForSelection = (
+        sourceKey: ModeOneSourceKey,
+        selectionValue: ModeOneFilterSelection[string],
+    ): boolean => {
+        if (selectionValue?.type !== 'text' || !selectionValue.value) {
+            return false;
+        }
+
+        const tagValue = stripGenderTagPrefix(selectionValue.value);
+        const tags = tagValue
+            .split(',')
+            .map((t) => stripGenderTagPrefix(t.trim()))
+            .filter(Boolean);
+
+        if (!tags.length) {
+            return false;
+        }
+
+        if (tags.length > 1) {
+            if (tagSearchMode === 'and') {
+                addQueryFragment(sourceKey, tags.join(' '));
+            } else if (tagSearchMode === 'or') {
+                tags.forEach((tag) => addQueryFragment(sourceKey, tag));
+            } else {
+                addQueryFragment(sourceKey, tags.join(' '));
+                if (!payloads[sourceKey].tagCombinations) {
+                    payloads[sourceKey].tagCombinations = generateProgressiveTagCombinations(tags);
+                    payloads[sourceKey].currentTagCombinationIndex = 0;
+                }
+            }
+        } else {
+            addQueryFragment(sourceKey, tags[0]);
+        }
+
+        return true;
     };
 
     const collectFallbackFragment = (
@@ -505,7 +563,7 @@ export const buildFilterPayloads = (
                 }
                 // Remove any category prefix that might have been accidentally added
                 // (e.g., "female:tag" -> "tag") to prevent GraphQL query errors
-                return selectionValue.value.replace(/^(?:male|female):\s*/i, '').trim();
+                return stripGenderTagPrefix(selectionValue.value);
             default:
                 return undefined;
         }
@@ -520,21 +578,18 @@ export const buildFilterPayloads = (
         activeSourceKeys.forEach((sourceKey) => {
             const descriptor = filter.perSource[sourceKey];
             if (!descriptor) {
-                const supportsFallback = QUERY_FALLBACK_SOURCES.has(sourceKey);
-                if (!supportsFallback) {
-                    addWarning(
-                        sourceKey,
-                        translate('modeOne.warning.missingFilter', {
-                            source: MODE_ONE_SOURCE_LABELS[sourceKey],
-                            filter: filter.label,
-                        }),
-                    );
-                }
+                const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filter.label);
+                const canUseTagFallback = isTagFilter && SOURCES_WITHOUT_GENDER_PREFIX.has(sourceKey);
+                const supportsFallback = QUERY_FALLBACK_SOURCES.has(sourceKey) || canUseTagFallback;
+                // Don't add warnings for unsupported filters - it's fine, not an error
+                // These warnings were previously shown on manga cards, but users don't need to see them
                 if (strictOnly) {
                     payloads[sourceKey].shouldInclude = false;
                 } else if (supportsFallback) {
-                    const fragment = collectFallbackFragment(filter, selectionValue);
-                    addQueryFragment(sourceKey, fragment);
+                    if (!(isTagFilter && applyTagFragmentsForSelection(sourceKey, selectionValue))) {
+                        const fragment = collectFallbackFragment(filter, selectionValue);
+                        addQueryFragment(sourceKey, fragment);
+                    }
                 }
                 return;
             }
@@ -574,14 +629,8 @@ export const buildFilterPayloads = (
                     }
 
                     if (valueIndex === undefined) {
-                        addWarning(
-                            sourceKey,
-                            translate('modeOne.warning.missingFilterValue', {
-                                source: MODE_ONE_SOURCE_LABELS[sourceKey],
-                                filter: filter.label,
-                                value: selectionValue.value,
-                            }),
-                        );
+                        // Don't add warnings for unsupported filter values - it's fine, not an error
+                        // These warnings were previously shown on manga cards, but users don't need to see them
                         if (strictOnly) {
                             payloads[sourceKey].shouldInclude = false;
                         }
@@ -644,35 +693,7 @@ export const buildFilterPayloads = (
                     if (QUERY_FALLBACK_SOURCES.has(sourceKey)) {
                         const isTagFilter = TAG_FILTER_LABEL_PATTERN.test(filter.label);
                         if (isTagFilter) {
-                            // Handle tag search mode for tag filters
-                            const tagValue = selectionValue.value.replace(/^(?:male|female):\s*/i, '').trim();
-                            const tags = tagValue.split(',').map(t => t.trim()).filter(Boolean);
-
-                            if (tags.length > 1) {
-                                // Multiple tags - apply search mode
-                                if (tagSearchMode === 'and') {
-                                    // AND mode: all tags together (strict)
-                                    addQueryFragment(sourceKey, tags.join(' '));
-                                } else if (tagSearchMode === 'or') {
-                                    // OR mode: each tag separately (search one after another)
-                                    // Each tag is added as a separate fragment
-                                    tags.forEach(tag => addQueryFragment(sourceKey, tag));
-                                } else {
-                                    // Hybrid mode: progressive tag search
-                                    // First, add all tags together (highest priority)
-                                    addQueryFragment(sourceKey, tags.join(' '));
-
-                                    // Store tag combinations for progressive search
-                                    // This will be used to make additional API calls when current combination is exhausted
-                                    if (!payloads[sourceKey].tagCombinations) {
-                                        payloads[sourceKey].tagCombinations = generateProgressiveTagCombinations(tags);
-                                        payloads[sourceKey].currentTagCombinationIndex = 0;
-                                    }
-                                }
-                            } else if (tags.length === 1) {
-                                // Single tag - just add it
-                                addQueryFragment(sourceKey, tags[0]);
-                            }
+                            applyTagFragmentsForSelection(sourceKey, selectionValue);
                         } else {
                             // Non-tag text filter - use existing logic
                             const fragment = collectFallbackFragment(filter, selectionValue);
@@ -715,3 +736,22 @@ export const convertToFilterChangeInput = (filters: IPos[]) =>
             [filter.type]: state,
         };
     });
+
+/**
+ * Parse a tag value string (potentially comma-separated) and return the base/canonical tag
+ * @param value - Tag value string, possibly comma-separated
+ * @returns Object with base tag name (first tag, cleaned)
+ */
+export function parseTagValue(value?: string | null): { base: string } {
+    if (!value) {
+        return { base: '' };
+    }
+
+    // Split by comma and take the first tag
+    const firstTag = value.split(',')[0].trim();
+    
+    // Clean the tag by removing gender prefixes
+    const base = stripGenderTagPrefix(firstTag);
+
+    return { base };
+}

@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "ci": "yarn install --frozen-lockfile",
+    "predev": "node scripts/rebuildTagDatabase.cjs",
     "dev": "vite",
     "preview": "vite preview",
+    "prebuild": "node scripts/rebuildTagDatabase.cjs",
     "build": "vite build",
     "test": "node -e \"console.log('imagine')\"",
     "build-md5": "find build -type f | sort | xargs md5sum | awk '{ print $1 }' | tr -d '\n' | md5sum| awk '{ print $1 }' > buildZip/md5sum ",

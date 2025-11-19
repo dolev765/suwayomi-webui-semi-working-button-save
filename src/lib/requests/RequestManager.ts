@@ -29,6 +29,7 @@ import { MaybeMasked, OperationVariables, Reference } from '@apollo/client/core'
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { IRestClient, RestClient } from '@/lib/requests/client/RestClient.ts';
 import { GraphQLClient } from '@/lib/requests/client/GraphQLClient.ts';
+import { stripGenderTagPrefix } from '@/lib/HelperFunctions.ts';
 import {
     CategoryOrderBy,
     ChapterConditionInput,
@@ -486,7 +487,8 @@ export class RequestManager {
         const abortController = new AbortController();
         const abortRequest = (reason?: any): void => {
             if (!abortController.signal.aborted) {
-                abortController.abort(reason);
+                // Provide a default reason if none is given to avoid Apollo warnings
+                abortController.abort(reason || 'Request cancelled');
             }
         };
 
@@ -1671,6 +1673,19 @@ export class RequestManager {
         GetSourceMangasFetchMutation,
         GetSourceMangasFetchMutationVariables
     > {
+        const normalizeQueryValue = (value?: string | null): string | undefined => {
+            if (!value) {
+                return undefined;
+            }
+            const cleaned = stripGenderTagPrefix(value);
+            const trimmed = cleaned?.trim();
+            return trimmed ? trimmed : undefined;
+        };
+
+        const normalizedQuery = normalizeQueryValue(input.query);
+        const normalizedInput: FetchSourceMangaInput =
+            normalizedQuery === input.query ? input : { ...input, query: normalizedQuery };
+
         type MutationResult = AbortableApolloUseMutationPaginatedResponse<
             GetSourceMangasFetchMutation,
             GetSourceMangasFetchMutationVariables
@@ -1680,11 +1695,11 @@ export class RequestManager {
         const createPaginatedResult = (
             result?: Partial<AbortableApolloUseMutationPaginatedResponse[1][number]> | null,
             page?: number,
-        ) => this.createPaginatedResult(result, input.page, page);
+        ) => this.createPaginatedResult(result, normalizedInput.page, page);
 
         const getVariablesFor = (page: number): GetSourceMangasFetchMutationVariables => ({
             input: {
-                ...input,
+                ...normalizedInput,
                 page,
             },
         });
@@ -1725,7 +1740,7 @@ export class RequestManager {
             cachedResults.length >= initialPages ||
             (!!cachedResults.length && !cachedResults[cachedResults.length - 1].data?.fetchSourceManga?.hasNextPage);
         const isResultForCurrentInput = result?.forInput === JSON.stringify(getVariablesFor(0));
-        const lastPage = cachedPages.size ? Math.max(...cachedPages) : input.page;
+        const lastPage = cachedPages.size ? Math.max(...cachedPages) : normalizedInput.page;
         const nextPage = isResultForCurrentInput ? result.size : lastPage;
 
         const paginatedResult =
@@ -1739,7 +1754,7 @@ export class RequestManager {
 
         const revalidatePage = async (pageToRevalidate: number, maxPage: number, signal: AbortSignal) =>
             this.revalidatePage(
-                input.source,
+                normalizedInput.source,
                 CACHE_RESULTS_KEY,
                 CACHE_PAGES_KEY,
                 getVariablesFor,
@@ -1790,7 +1805,12 @@ export class RequestManager {
                 (abortRequest) => {
                     abortRequestRef.current = abortRequest;
                 },
-                () => ({ forType: input.type, forQuery: input.query }),
+                () => {
+                    return {
+                        forType: normalizedInput.type,
+                        forQuery: normalizedInput.query,
+                    };
+                },
                 createPaginatedResult,
                 setResult,
                 revalidate,

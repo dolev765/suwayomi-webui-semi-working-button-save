@@ -761,8 +761,8 @@ export const ModeOne = () => {
                         const allWarnings = [...feedWarnings];
                         if (omittedTags.length > 0) {
                             const omittedWarning = omittedTags.length === 1
-                                ? `Missing tag: ${omittedTags[0]}`
-                                : `Missing tags: ${omittedTags.join(', ')}`;
+                                ? `Tag not available: ${omittedTags[0]}`
+                                : `Tags not available: ${omittedTags.join(', ')}`;
                             allWarnings.push(omittedWarning);
                         }
 

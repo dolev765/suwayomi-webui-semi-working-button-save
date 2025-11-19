@@ -61,6 +61,8 @@ let db: SqlJsDatabase | null = null;
 let dbInitialized = false;
 let dbLoadingPromise: Promise<void> | null = null;
 let sqlFileLoadingPromise: Promise<void> | null = null;
+let dbRecoveryInProgress = false;
+let binaryDatabaseCorrupted = false; // Flag to skip corrupted binary file
 
 // Initialize SQL.js
 const initDatabase = async (): Promise<void> => {
@@ -88,18 +90,32 @@ const initDatabase = async (): Promise<void> => {
             if (!SQL) {
                 logProgress('💾 initDatabase: Loading SQL.js WebAssembly');
                 const sqlJsInit = await getInitSqlJs();
-                SQL = await sqlJsInit({
-                    locateFile: (file: string) => {
-                        // Try to load from public folder first (for both dev and prod)
-                        // Fall back to CDN if not found
-                        if (file.endsWith('.wasm')) {
-                            return `/sql-wasm.wasm`;
-                        }
-                        // For other files, use CDN
-                        return `https://sql.js.org/dist/${file}`;
-                    },
-                });
-                logProgress('✅ initDatabase: SQL.js loaded');
+
+                // Try loading with local WASM file first, fall back to CDN on error
+                try {
+                    SQL = await sqlJsInit({
+                        locateFile: (file: string) => {
+                            // Try to load from public folder first (for both dev and prod)
+                            // Fall back to CDN if not found
+                            if (file.endsWith('.wasm')) {
+                                return `/sql-wasm.wasm`;
+                            }
+                            // For other files, use CDN
+                            return `https://sql.js.org/dist/${file}`;
+                        },
+                    });
+                    logProgress('✅ initDatabase: SQL.js loaded from local file');
+                } catch (localError) {
+                    // If local file fails (corrupted or missing), fall back to CDN
+                    logProgress('⚠️ initDatabase: Local WASM failed, trying CDN');
+                    SQL = await sqlJsInit({
+                        locateFile: (file: string) => {
+                            // Always use CDN as fallback
+                            return `https://sql.js.org/dist/${file}`;
+                        },
+                    });
+                    logProgress('✅ initDatabase: SQL.js loaded from CDN');
+                }
             }
 
             // Try to load from IndexedDB (fastest - instant, but requires SQL.js)
@@ -112,52 +128,116 @@ const initDatabase = async (): Promise<void> => {
             }
 
             // Try to load pre-compiled database binary (fast - 1-2 seconds)
-            try {
-                logProgress('💾 initDatabase: Fetching binary database');
-                const binaryResponse = await fetch('/tag-database.db');
-                if (binaryResponse.ok) {
-                    logProgress('💾 initDatabase: Binary found, loading...');
-                    const arrayBuffer = await binaryResponse.arrayBuffer();
-                    const uint8Array = new Uint8Array(arrayBuffer);
-                    if (!SQL) {
-                        throw new Error('SQL.js not initialized');
-                    }
-                    db = new SQL.Database(uint8Array);
-                    if (db) {
-                        logProgress('✅ initDatabase: Binary database loaded');
-                        dbInitialized = true;
-
-                        // Verify database has data
-                        try {
-                            const checkResult = db.exec('SELECT COUNT(*) FROM tags');
-                            const tagCount = checkResult.length > 0 && checkResult[0].values && Array.isArray(checkResult[0].values) && checkResult[0].values.length > 0 && checkResult[0].values[0].length > 0
-                                ? (checkResult[0].values[0][0] as number) || 0
-                                : 0;
-                            logProgress(`📊 initDatabase: Binary database has ${tagCount} tags`);
-
-                            if (tagCount === 0) {
-                                logProgress('⚠️ initDatabase: Binary database is empty! Attempting to load JSON files...');
-                                // Try to load JSON files
-                                void forceConvertJSONToSQL().catch((error) => {
-                                    dbWarn('Failed to load JSON files:', error);
-                                });
-                            }
-                        } catch (verifyError) {
-                            logProgress('⚠️ initDatabase: Could not verify binary database contents');
+            // Skip if we know the binary is corrupted
+            if (binaryDatabaseCorrupted) {
+                logProgress('⚠️ initDatabase: Skipping corrupted binary database, will rebuild from JSON');
+            } else {
+                try {
+                    logProgress('💾 initDatabase: Fetching binary database');
+                    const binaryResponse = await fetch('/tag-database.db');
+                    if (binaryResponse.ok) {
+                        logProgress('💾 initDatabase: Binary found, loading...');
+                        const arrayBuffer = await binaryResponse.arrayBuffer();
+                        const uint8Array = new Uint8Array(arrayBuffer);
+                        if (!SQL) {
+                            throw new Error('SQL.js not initialized');
                         }
 
-                        // Save to IndexedDB for next time (non-blocking)
-                        void saveDatabaseToIndexedDB().catch(() => {
-                            // Ignore errors
-                        });
-                        return;
+                        // Try to load database and verify it's not corrupted
+                        try {
+                            db = new SQL.Database(uint8Array);
+
+                            // Verify database is not corrupted by running a simple query first
+                            try {
+                                db.exec('SELECT 1');
+                            } catch (corruptionError) {
+                                if (isCorruptionError(corruptionError)) {
+                                    throw new Error('Database is corrupted');
+                                }
+                                throw corruptionError;
+                            }
+
+                            if (db) {
+                                logProgress('✅ initDatabase: Binary database loaded');
+                                dbInitialized = true;
+
+                                // Verify database has data
+                                try {
+                                    const checkResult = db.exec('SELECT COUNT(*) FROM tags');
+                                    const tagCount = checkResult.length > 0 && checkResult[0].values && Array.isArray(checkResult[0].values) && checkResult[0].values.length > 0 && checkResult[0].values[0].length > 0
+                                        ? (checkResult[0].values[0][0] as number) || 0
+                                        : 0;
+                                    logProgress(`📊 initDatabase: Binary database has ${tagCount} tags`);
+
+                                    if (tagCount === 0) {
+                                        logProgress('⚠️ initDatabase: Binary database is empty! Attempting to load JSON files...');
+                                        // Try to load JSON files
+                                        void forceConvertJSONToSQL().catch((error) => {
+                                            dbWarn('Failed to load JSON files:', error);
+                                        });
+                                    }
+                                } catch (verifyError) {
+                                    // Check if this is a corruption error
+                                    if (isCorruptionError(verifyError)) {
+                                        logProgress('⚠️ initDatabase: Binary database is corrupted during verification, marking as corrupted and attempting to rebuild...');
+                                        binaryDatabaseCorrupted = true; // Mark binary as corrupted
+                                        db = null;
+                                        dbInitialized = false;
+                                        // Try to rebuild from JSON files
+                                        try {
+                                            await attemptDatabaseRecovery();
+                                            return; // Recovery succeeded
+                                        } catch (recoveryError) {
+                                            dbWarn('⚠️ Database recovery failed, will create empty database:', recoveryError);
+                                            // Fall through to create empty database
+                                        }
+                                    } else {
+                                        logProgress('⚠️ initDatabase: Could not verify binary database contents', verifyError instanceof Error ? verifyError.message : String(verifyError));
+                                    }
+                                }
+
+                                // Save to IndexedDB for next time (non-blocking)
+                                void saveDatabaseToIndexedDB().catch(() => {
+                                    // Ignore errors
+                                });
+                                return;
+                            }
+                        } catch (dbError) {
+                            if (isCorruptionError(dbError)) {
+                                logProgress('⚠️ initDatabase: Binary database is corrupted, marking as corrupted and attempting to rebuild from JSON files...');
+                                binaryDatabaseCorrupted = true; // Mark binary as corrupted
+                                await clearCorruptedDatabase();
+                                // Try to rebuild from JSON files (await to ensure it completes)
+                                try {
+                                    await attemptDatabaseRecovery();
+                                    // If recovery succeeded, we're done
+                                    return;
+                                } catch (recoveryError) {
+                                    dbWarn('⚠️ Database recovery failed, will create empty database:', recoveryError);
+                                    // Fall through to create empty database
+                                }
+                            } else {
+                                throw dbError;
+                            }
+                        }
+                    } else {
+                        logProgress(`⚠️ initDatabase: Binary database not found (status: ${binaryResponse.status}), will try to rebuild from JSON files`);
                     }
-                } else {
-                    logProgress(`⚠️ initDatabase: Binary database not found (status: ${binaryResponse.status})`);
+                } catch (error) {
+                    if (isCorruptionError(error)) {
+                        logProgress('⚠️ initDatabase: Error loading binary database, marking as corrupted and attempting to rebuild from JSON files...');
+                        binaryDatabaseCorrupted = true; // Mark binary as corrupted
+                        await clearCorruptedDatabase();
+                        try {
+                            await attemptDatabaseRecovery();
+                            return; // Recovery succeeded
+                        } catch (recoveryError) {
+                            dbWarn('⚠️ Database recovery failed, will create empty database:', recoveryError);
+                        }
+                    } else {
+                        logProgress('⚠️ initDatabase: Binary not found, will try to rebuild from JSON files');
+                    }
                 }
-            } catch (error) {
-                logProgress('⚠️ initDatabase: Binary not found, creating empty database');
-                // Binary not found, will create empty database
             }
 
             // Create new database if not loaded
@@ -245,11 +325,14 @@ const initDatabase = async (): Promise<void> => {
                     : 0;
 
                 if (tagCount === 0) {
-                    logProgress('💾 initDatabase: Database empty, attempting to load JSON files');
-                    // Try to load JSON files in background (non-blocking)
-                    void forceConvertJSONToSQL().catch((error) => {
-                        dbWarn('Failed to auto-load JSON files (this is normal if files are not present):', error);
-                    });
+                    logProgress('💾 initDatabase: Database empty, attempting to rebuild from JSON files');
+                    // Try to load JSON files - this will rebuild the database
+                    try {
+                        await forceConvertJSONToSQL();
+                        logProgress('✅ initDatabase: Successfully rebuilt database from JSON files');
+                    } catch (error) {
+                        dbWarn('⚠️ Failed to rebuild database from JSON files (this is normal if files are not present):', error);
+                    }
                 }
             } catch (checkError) {
                 // Table might not exist yet, that's okay
@@ -576,32 +659,62 @@ export const loadCustomTagDatabase = async (
             database.run('DELETE FROM tag_aliases');
             database.run('DELETE FROM tags');
 
-            // Process male tags
+            // Process male tags in batches to avoid blocking
             const maleEntries = Object.entries(maleTags).filter(([key]) => key !== 'comment');
-            for (let i = 0; i < maleEntries.length; i++) {
-                const [canonical, data] = maleEntries[i];
-                try {
-                    insertTag(database, canonical, data, 'male');
-                } catch (tagError) {
-                    dbError(`Failed to insert male tag "${canonical}":`, tagError);
-                    // Continue with next tag instead of failing entire batch
-                }
-            }
+            dbLog(`💾 Processing ${maleEntries.length} male tags...`);
+            const BATCH_SIZE = 100; // Process in smaller batches
+            for (let batchStart = 0; batchStart < maleEntries.length; batchStart += BATCH_SIZE) {
+                const batchEnd = Math.min(batchStart + BATCH_SIZE, maleEntries.length);
+                dbLog(`💾 Processing male tags ${batchStart + 1}-${batchEnd} of ${maleEntries.length}...`);
 
-            // Process female tags
+                for (let i = batchStart; i < batchEnd; i++) {
+                    const [canonical, data] = maleEntries[i];
+                    try {
+                        insertTag(database, canonical, data, 'male');
+                    } catch (tagError) {
+                        dbError(`Failed to insert male tag "${canonical}":`, tagError);
+                        // Continue with next tag instead of failing entire batch
+                    }
+                }
+
+                // Commit batch and start new transaction (except for last batch)
+                database.run('COMMIT');
+                if (batchEnd < maleEntries.length) {
+                    database.run('BEGIN TRANSACTION');
+                }
+                dbLog(`✅ Committed batch ${Math.floor(batchStart / BATCH_SIZE) + 1} (${batchEnd} male tags processed)`);
+            }
+            dbLog(`✅ Processed ${maleEntries.length} male tags`);
+
+            // Process female tags in batches
             const femaleEntries = Object.entries(femaleTags).filter(([key]) => key !== 'comment');
-            for (let i = 0; i < femaleEntries.length; i++) {
-                const [canonical, data] = femaleEntries[i];
-                try {
-                    insertTag(database, canonical, data, 'female');
-                } catch (tagError) {
-                    dbError(`Failed to insert female tag "${canonical}":`, tagError);
-                    // Continue with next tag instead of failing entire batch
-                }
-            }
+            dbLog(`💾 Processing ${femaleEntries.length} female tags...`);
+            // Start new transaction for female tags
+            database.run('BEGIN TRANSACTION');
+            for (let batchStart = 0; batchStart < femaleEntries.length; batchStart += BATCH_SIZE) {
+                const batchEnd = Math.min(batchStart + BATCH_SIZE, femaleEntries.length);
+                dbLog(`💾 Processing female tags ${batchStart + 1}-${batchEnd} of ${femaleEntries.length}...`);
 
-            // Commit transaction
-            database.run('COMMIT');
+                for (let i = batchStart; i < batchEnd; i++) {
+                    const [canonical, data] = femaleEntries[i];
+                    try {
+                        insertTag(database, canonical, data, 'female');
+                    } catch (tagError) {
+                        dbError(`Failed to insert female tag "${canonical}":`, tagError);
+                        // Continue with next tag instead of failing entire batch
+                    }
+                }
+
+                // Commit batch and start new transaction (except for last batch)
+                database.run('COMMIT');
+                if (batchEnd < femaleEntries.length) {
+                    database.run('BEGIN TRANSACTION');
+                }
+                dbLog(`✅ Committed batch ${Math.floor(batchStart / BATCH_SIZE) + 1} (${batchEnd} female tags processed)`);
+            }
+            dbLog(`✅ Processed ${femaleEntries.length} female tags`);
+
+            // All batches committed, no final commit needed
             transactionCommitted = true;
         } catch (transactionError) {
             // Rollback on any error
@@ -799,6 +912,190 @@ const saveDatabaseToIndexedDB = async (): Promise<void> => {
     }
 };
 
+// Helper to detect database corruption
+const isCorruptionError = (error: any): boolean => {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return errorMessage.includes('malformed') ||
+        errorMessage.includes('corrupt') ||
+        errorMessage.includes('database disk image');
+};
+
+// Clear corrupted database and caches
+const clearCorruptedDatabase = async (): Promise<void> => {
+    db = null;
+    dbInitialized = false;
+    binaryDatabaseCorrupted = true; // Mark binary as corrupted
+
+    // Clear IndexedDB cache
+    let idb: any = null;
+    try {
+        const { openDB } = await import('idb');
+        idb = await openDB('customTagSQLDB', DATABASE_VERSION);
+        await idb.delete('database', 'sqlite-db');
+        await idb.delete('database', 'version');
+        dbLog('🧹 Cleared corrupted database from IndexedDB');
+    } catch (error) {
+        // Ignore errors when clearing
+    } finally {
+        if (idb) {
+            try {
+                await idb.close();
+            } catch (closeError) {
+                // Ignore close errors
+            }
+        }
+    }
+};
+
+// Attempt to recover from corruption by reloading from JSON files
+const attemptDatabaseRecovery = async (): Promise<void> => {
+    if (dbRecoveryInProgress) {
+        return; // Already recovering
+    }
+
+    dbRecoveryInProgress = true;
+    try {
+        dbLog('🔄 Attempting to rebuild database from JSON files...');
+        await clearCorruptedDatabase();
+
+        // Create a fresh database directly (skip IndexedDB and binary)
+        if (!SQL) {
+            const sqlJsInit = await getInitSqlJs();
+            SQL = await sqlJsInit({
+                locateFile: (file: string) => {
+                    if (file.endsWith('.wasm')) {
+                        return `/sql-wasm.wasm`;
+                    }
+                    return `https://sql.js.org/dist/${file}`;
+                },
+            });
+        }
+
+        // Create new empty database
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        if (!SQL) {
+            throw new Error('SQL.js not initialized');
+        }
+        db = new SQL!.Database();
+        dbInitialized = true;
+
+        // Create schema
+        db.run(`
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL CHECK(category IN ('male', 'female')),
+                aliases TEXT,
+                recommended TEXT,
+                related TEXT,
+                normalized_canonical TEXT NOT NULL,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical);
+            CREATE INDEX IF NOT EXISTS idx_tags_category ON tags(category);
+            CREATE INDEX IF NOT EXISTS idx_tags_normalized ON tags(normalized_canonical);
+            CREATE INDEX IF NOT EXISTS idx_tags_normalized_prefix ON tags(normalized_canonical COLLATE NOCASE);
+
+            CREATE TABLE IF NOT EXISTS tag_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                normalized_alias TEXT NOT NULL,
+                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE,
+                UNIQUE(tag_id, normalized_alias)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_aliases_tag_id ON tag_aliases(tag_id);
+            CREATE INDEX IF NOT EXISTS idx_aliases_alias ON tag_aliases(normalized_alias);
+            CREATE INDEX IF NOT EXISTS idx_aliases_alias_prefix ON tag_aliases(normalized_alias COLLATE NOCASE);
+
+            CREATE TABLE IF NOT EXISTS tag_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_id INTEGER NOT NULL,
+                token TEXT NOT NULL,
+                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE,
+                UNIQUE(tag_id, token)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tokens_tag_id ON tag_tokens(tag_id);
+            CREATE INDEX IF NOT EXISTS idx_tokens_token ON tag_tokens(token);
+            CREATE INDEX IF NOT EXISTS idx_tokens_token_prefix ON tag_tokens(token COLLATE NOCASE);
+
+            CREATE TABLE IF NOT EXISTS tag_recommended (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_id INTEGER NOT NULL,
+                recommended_tag TEXT NOT NULL,
+                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_recommended_tag_id ON tag_recommended(tag_id);
+
+            CREATE TABLE IF NOT EXISTS tag_related (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_id INTEGER NOT NULL,
+                related_tag TEXT NOT NULL,
+                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_related_tag_id ON tag_related(tag_id);
+        `);
+
+        dbLog('✅ Fresh database schema created');
+
+        // Rebuild from JSON files
+        dbLog('💾 Starting to load JSON files...');
+        try {
+            await forceConvertJSONToSQL();
+            dbLog('✅ Database successfully rebuilt from JSON files');
+
+            // Verify the rebuild worked
+            if (db) {
+                const checkResult = db.exec('SELECT COUNT(*) FROM tags');
+                const tagCount = checkResult.length > 0 && checkResult[0].values && Array.isArray(checkResult[0].values) && checkResult[0].values.length > 0 && checkResult[0].values[0].length > 0
+                    ? (checkResult[0].values[0][0] as number) || 0
+                    : 0;
+                dbLog(`📊 Rebuilt database has ${tagCount} tags`);
+
+                // Save to IndexedDB for next time
+                await saveDatabaseToIndexedDB();
+                dbLog('✅ Rebuilt database saved to IndexedDB');
+            }
+        } catch (jsonError) {
+            dbError('❌ Failed to load JSON files during recovery:', jsonError);
+            throw jsonError; // Re-throw to be caught by outer catch
+        }
+    } catch (error) {
+        dbError('❌ Database recovery/rebuild failed:', error);
+        // If recovery fails, at least ensure we have an empty database
+        try {
+            if (!db || !dbInitialized) {
+                if (!SQL) {
+                    const sqlJsInit = await getInitSqlJs();
+                    SQL = await sqlJsInit({
+                        locateFile: (file: string) => {
+                            if (file.endsWith('.wasm')) {
+                                return `/sql-wasm.wasm`;
+                            }
+                            return `https://sql.js.org/dist/${file}`;
+                        },
+                    });
+                }
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                if (!SQL) {
+                    throw new Error('SQL.js not initialized');
+                }
+                db = new SQL!.Database();
+                dbInitialized = true;
+            }
+        } catch (initError) {
+            dbError('❌ Failed to initialize empty database after recovery failure:', initError);
+        }
+    } finally {
+        dbRecoveryInProgress = false;
+    }
+};
+
 // Load database from IndexedDB
 const loadDatabaseFromIndexedDB = async (): Promise<boolean> => {
     if (!SQL) {
@@ -823,11 +1120,24 @@ const loadDatabaseFromIndexedDB = async (): Promise<boolean> => {
 
         if (buffer && SQL) {
             db = new SQL.Database(new Uint8Array(buffer));
-            dbInitialized = true;
-            return true;
+
+            // Verify database is not corrupted by running a simple query
+            try {
+                db.exec('SELECT 1');
+                dbInitialized = true;
+                return true;
+            } catch (verifyError) {
+                // Database is corrupted, clear it
+                dbError('⚠️ IndexedDB database is corrupted, clearing cache');
+                await clearCorruptedDatabase();
+                return false;
+            }
         }
     } catch (error) {
         // Failed to load from IndexedDB, will create new
+        if (isCorruptionError(error)) {
+            await clearCorruptedDatabase();
+        }
     } finally {
         // Always close IndexedDB connection
         if (idb) {
@@ -1237,7 +1547,15 @@ export const searchCustomTags = (
 
         return finalResults;
     } catch (error) {
-        dbError('SQL search error:', error);
+        if (isCorruptionError(error)) {
+            dbError('❌ Database corruption detected in searchCustomTags, attempting recovery...', error);
+            // Trigger recovery in background (non-blocking)
+            void attemptDatabaseRecovery().catch((recoveryError) => {
+                dbError('Failed to recover database:', recoveryError);
+            });
+        } else {
+            dbError('SQL search error:', error);
+        }
         return [];
     }
 };
@@ -1284,7 +1602,15 @@ export const getCustomTag = async (canonical: string): Promise<any> => {
             };
         }
     } catch (error) {
-        dbError('SQL get tag error:', error);
+        if (isCorruptionError(error)) {
+            dbError('❌ Database corruption detected in getCustomTag, attempting recovery...', error);
+            // Trigger recovery in background (non-blocking)
+            void attemptDatabaseRecovery().catch((recoveryError) => {
+                dbError('Failed to recover database:', recoveryError);
+            });
+        } else {
+            dbError('SQL get tag error:', error);
+        }
     }
 
     return undefined;
@@ -1378,7 +1704,15 @@ export const getAllTagsByCategory = (category?: 'male' | 'female'): Array<{ cano
             }));
         }
     } catch (error) {
-        dbError('SQL get all tags by category error:', error);
+        if (isCorruptionError(error)) {
+            dbError('❌ Database corruption detected in getAllTagsByCategory, attempting recovery...', error);
+            // Trigger recovery in background (non-blocking)
+            void attemptDatabaseRecovery().catch((recoveryError) => {
+                dbError('Failed to recover database:', recoveryError);
+            });
+        } else {
+            dbError('SQL get all tags by category error:', error);
+        }
     }
 
     return [];
@@ -1592,22 +1926,53 @@ export const forceConvertJSONToSQL = async (): Promise<void> => {
     // Force converting JSON files to SQLite
 
     try {
+        // Ensure database is initialized first
+        // But if we're in recovery mode, don't call initDatabase() as it might try to load corrupted data
+        if (!db || !dbInitialized) {
+            if (!dbRecoveryInProgress) {
+                await initDatabase();
+            } else {
+                // In recovery mode, database should already be initialized by attemptDatabaseRecovery()
+                if (!db || !dbInitialized) {
+                    throw new Error('Database not initialized during recovery');
+                }
+            }
+        }
+
         // Fetch JSON files
+        dbLog('📥 Fetching JSON files...');
         const [maleResponse, femaleResponse] = await Promise.all([
             fetch('/male-tags-custom.json'),
             fetch('/female-tags-custom.json'),
         ]);
 
+        if (!maleResponse.ok && !femaleResponse.ok) {
+            throw new Error('Neither male-tags-custom.json nor female-tags-custom.json found');
+        }
+
+        dbLog('📥 JSON files fetched, parsing...');
         const maleTags = maleResponse.ok ? await maleResponse.json() : {};
         const femaleTags = femaleResponse.ok ? await femaleResponse.json() : {};
 
+        const maleCount = Object.keys(maleTags).filter(k => k !== 'comment').length;
+        const femaleCount = Object.keys(femaleTags).filter(k => k !== 'comment').length;
+        dbLog(`📊 Found ${maleCount} male tags and ${femaleCount} female tags in JSON files`);
+
         // Force reconversion by clearing existing database
+        dbLog('💾 Converting JSON to SQLite database...');
         await loadCustomTagDatabase(maleTags, femaleTags, true);
-        // Force conversion completed
+        dbLog('✅ Force conversion completed - database rebuilt from JSON files');
     } catch (error) {
         dbError('❌ Force conversion failed:', error);
         throw error;
     }
+};
+
+// Public function to rebuild database from JSON files (useful for manual recovery)
+export const rebuildDatabaseFromJSON = async (): Promise<void> => {
+    dbLog('🔨 Manual database rebuild requested');
+    await clearCorruptedDatabase();
+    await attemptDatabaseRecovery();
 };
 
 // Initialize on module load - try to load existing database

@@ -14,13 +14,21 @@ export abstract class BaseClient<Client, ClientConfig, Fetcher> {
     public abstract readonly fetcher: Fetcher;
 
     public getBaseUrl(): string {
-        const { hostname, port, protocol } = window.location;
+        const { hostname, protocol } = window.location;
 
+        // In dev mode, default to the backend server port (4567), not the Vite dev server port
         const defaultUrl = import.meta.env.DEV
-            ? import.meta.env.VITE_SERVER_URL_DEFAULT
-            : `${protocol}//${hostname}:${port}`;
+            ? (import.meta.env.VITE_SERVER_URL_DEFAULT || `${protocol}//${hostname}:4567`)
+            : `${protocol}//${hostname}:4567`;
 
-        return AppStorage.local.getItemParsed('serverBaseURL', defaultUrl);
+        const storedUrl = AppStorage.local.getItemParsed('serverBaseURL', defaultUrl);
+        
+        // Ensure we never return undefined or a string containing "undefined"
+        if (!storedUrl || storedUrl.includes('undefined')) {
+            return `${protocol}//${hostname}:4567`;
+        }
+        
+        return storedUrl;
     }
 
     public abstract updateConfig(config: Partial<ClientConfig>): void;

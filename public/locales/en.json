@@ -342,6 +342,7 @@
       "cancel": "Cancel",
       "changelog": "Changelog",
       "clear": "Clear",
+      "close": "Close",
       "copy": "Copy",
       "create": "Create",
       "delete": "Delete",
@@ -1721,16 +1722,16 @@
       },
       "tagSearch": {
         "placeholder": "Search for tags",
-        "help": "Search for any tag to find sources that have it.",
-        "hint": "This tag is available in {{count}} source(s).",
-        "missing": "No sources have this tag yet."
+        "help": "Search for any tag to find where it's available.",
+        "hint": "This tag is available in {{count}} place(s).",
+        "missing": "This tag is not available yet."
       }
     },
     "warning": {
       "tooltip": "Some filters were not applied",
       "title": "Unsupported filters",
-      "missingFilter": "{{source}} does not support \"{{filter}}\"",
-      "missingFilterValue": "{{source}} does not offer \"{{value}}\" in \"{{filter}}\""
+      "missingFilter": "\"{{filter}}\" is not supported",
+      "missingFilterValue": "\"{{value}}\" is not available in \"{{filter}}\""
     }
   },
   "updates": {

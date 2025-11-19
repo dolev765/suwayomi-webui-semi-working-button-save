@@ -2,12 +2,13 @@ import { ApolloError } from '@apollo/client';
 import { useCallback, useEffect, useMemo } from 'react';
 
 import { MangaCardProps } from '@/features/manga/Manga.types.ts';
-import { ModeOneFilterPayload } from '@/features/mode-one/ModeOne.types.ts';
+import { ModeOneFilterPayload, ModeOneSourceKey } from '@/features/mode-one/ModeOne.types.ts';
 import { defaultPromiseErrorHandler } from '@/lib/DefaultPromiseErrorHandler.ts';
 import { FetchSourceMangaType } from '@/lib/graphql/generated/graphql.ts';
 import { requestManager } from '@/lib/requests/RequestManager.ts';
+import { stripGenderTagPrefix } from '@/lib/HelperFunctions.ts';
 
-import { convertToFilterChangeInput, getUniqueMangas } from './filterUtils.ts';
+import { convertToFilterChangeInput, getUniqueMangas, SOURCES_WITHOUT_GENDER_PREFIX } from './filterUtils.ts';
 
 export type ModeOneFeedState = {
     mangas: MangaCardProps['manga'][];
@@ -28,6 +29,9 @@ export const useSourceFeed = (
     filterPayload: ModeOneFilterPayload,
     query: string,
 ): ModeOneFeedState => {
+    const sourceKey = label as ModeOneSourceKey;
+    const shouldStripGenderPrefixes = SOURCES_WITHOUT_GENDER_PREFIX.has(sourceKey);
+
     const normalizedFragments = useMemo(() => {
         const fragments = filterPayload.queryFragments ?? [];
         const unique = new Set<string>();
@@ -40,15 +44,24 @@ export const useSourceFeed = (
         return [...unique];
     }, [filterPayload.queryFragments]);
 
+    const fragmentsForQuery = useMemo(() => {
+        if (!shouldStripGenderPrefixes) {
+            return normalizedFragments;
+        }
+        return normalizedFragments.map((fragment) => stripGenderTagPrefix(fragment)).filter(Boolean);
+    }, [normalizedFragments, shouldStripGenderPrefixes]);
+
     // Handle query building based on tag search mode
     // AND mode: all tags together (joined with spaces)
     // OR mode: each tag separately (we'll need to make multiple calls)
     // Hybrid mode: all tags together first, then individual tags as fallback
     const combinedQuery = useMemo(() => {
-        const base = query.trim();
+        const base = shouldStripGenderPrefixes ? stripGenderTagPrefix(query) : query.trim();
         const tagSearchMode = filterPayload.tagSearchMode ?? 'hybrid';
 
-        if (!normalizedFragments.length) {
+        const fragments = fragmentsForQuery;
+
+        if (!fragments.length) {
             return base;
         }
 
@@ -56,14 +69,14 @@ export const useSourceFeed = (
         // The current API call structure only supports one query at a time
         // For now, we'll use the first fragment for the initial call
         // TODO: Implement proper OR mode with multiple API calls per source
-        if (tagSearchMode === 'or' && normalizedFragments.length > 1) {
+        if (tagSearchMode === 'or' && fragments.length > 1) {
             // OR mode: use first fragment (others would need separate calls)
-            return base ? `${base} ${normalizedFragments[0]}` : normalizedFragments[0];
+            return base ? `${base} ${fragments[0]}` : fragments[0];
         }
 
         // For AND mode: join all fragments with spaces (all tags together)
         // For hybrid mode: also join all fragments (AND first), individual tags are added as fallback fragments
-        const parts = [...normalizedFragments];
+        const parts = [...fragments];
         if (base) {
             parts.unshift(base);
         }
