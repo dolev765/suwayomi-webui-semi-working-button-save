@@ -17,12 +17,7 @@ import {
     TAG_FILTER_LABEL_PATTERN,
 } from '@/features/mode-one/ModeOne.types.ts';
 import { parseTagValue } from '@/features/mode-one/screens/mode-one/filterUtils.ts';
-import {
-    ensureDatabaseReady,
-    getRecommendedTags,
-    searchCustomTags,
-    type TagSearchResult
-} from '@/features/mode-one/services/tagDatabaseSQL.ts';
+import { ensureDatabaseReady, getAllTagsByCategory, getCustomTag, getRecommendedTags } from '@/features/mode-one/services/tagDatabaseSQL.ts';
 import {
     getTagSuggestions,
     initializeTagSynonyms,
@@ -31,32 +26,25 @@ import {
     TagSuggestion,
 } from '@/features/mode-one/services/tagSynonyms.ts';
 import { TriState } from '@/lib/graphql/generated/graphql.ts';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import SearchIcon from '@mui/icons-material/Search';
 import TuneIcon from '@mui/icons-material/Tune';
-import Accordion from '@mui/material/Accordion';
-import AccordionDetails from '@mui/material/AccordionDetails';
-import AccordionSummary from '@mui/material/AccordionSummary';
 import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
-import CircularProgress from '@mui/material/CircularProgress';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
-import FormControlLabel from '@mui/material/FormControlLabel';
 import InputAdornment from '@mui/material/InputAdornment';
 import Stack from '@mui/material/Stack';
 import { alpha, keyframes, styled } from '@mui/material/styles';
-import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 // HentaiHere-inspired color scheme
@@ -818,15 +806,11 @@ const TextFilterControl = ({
     const supportLabel = buildSupportLabel(supportedSources.length);
     const [isBurstVisible, setIsBurstVisible] = useState(false);
     const [inputValue, setInputValue] = useState(value);
-
-    // Async search state
-    const [options, setOptions] = useState<TagSearchResult[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [open, setOpen] = useState(false);
-
+    const [tagOptions, setTagOptions] = useState<string[]>([]);
+    const [forceOpen, setForceOpen] = useState(false);
     const valueRef = useRef(value);
     const shouldSkipSyncRef = useRef(false);
-    const searchTimeoutRef = useRef<NodeJS.Timeout>();
+    const clickedBeforeLoadRef = useRef(false);
 
     // Determine category from filter label
     const tagCategory = useMemo(() => {
@@ -836,7 +820,33 @@ const TextFilterControl = ({
         return undefined;
     }, [filterLabel]);
 
-    // Sync inputValue with value prop
+    // Load tags when it's a tag filter (load on mount and when opening)
+    useEffect(() => {
+        if (!isTagFilter) {
+            return;
+        }
+
+        const loadTags = async () => {
+            try {
+                await ensureDatabaseReady();
+                const tags = getAllTagsByCategory(tagCategory);
+                const tagNames = tags.map(t => t.canonical);
+                setTagOptions(tagNames);
+                // If user clicked before options loaded, open now
+                if (clickedBeforeLoadRef.current && tagNames.length > 0) {
+                    setForceOpen(true);
+                    clickedBeforeLoadRef.current = false;
+                }
+            } catch (error) {
+                console.error('Failed to load tags:', error);
+            }
+        };
+
+        void loadTags();
+    }, [isTagFilter, tagCategory]);
+
+    // Sync inputValue with value prop and update ref
+    // Skip sync if we just cleared the input intentionally
     useEffect(() => {
         if (shouldSkipSyncRef.current) {
             shouldSkipSyncRef.current = false;
@@ -856,38 +866,7 @@ const TextFilterControl = ({
         return () => clearTimeout(timeout);
     }, [value, supportedSources.length]);
 
-    // Debounced search function
-    const handleSearch = useCallback((query: string) => {
-        if (searchTimeoutRef.current) {
-            clearTimeout(searchTimeoutRef.current);
-        }
-
-        if (!query || query.trim().length < 2) {
-            setOptions([]);
-            setLoading(false);
-            return;
-        }
-
-        setLoading(true);
-        searchTimeoutRef.current = setTimeout(async () => {
-            try {
-                await ensureDatabaseReady();
-                const results = searchCustomTags(query, {
-                    category: tagCategory,
-                    limit: 50,
-                    minScore: 50
-                });
-                setOptions(results);
-            } catch (error) {
-                console.error('Tag search failed:', error);
-                setOptions([]);
-            } finally {
-                setLoading(false);
-            }
-        }, 300); // 300ms debounce
-    }, [tagCategory]);
-
-    // Handle change for tag filters
+    // Handle change for tag filters with Autocomplete
     const handleChange = useCallback((newValue: string | null, append: boolean = false, clearInput: boolean = false) => {
         if (!newValue) {
             setInputValue('');
@@ -896,35 +875,47 @@ const TextFilterControl = ({
             return;
         }
 
+        // Always use the ref to get the latest committed value when appending
         const baseValue = append ? valueRef.current : value;
+
         let finalValue: string;
         let tagAdded = false;
 
         if (append && isTagFilter && baseValue) {
+            // For tag filters, append comma-separated tags
             const existingTags = baseValue.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
             const newTagLower = newValue.trim().toLowerCase();
 
+            // Check if tag already exists
             if (existingTags.some(tag => tag === newTagLower || tag.includes(newTagLower) || newTagLower.includes(tag))) {
+                // Tag already exists, don't add duplicate
                 setInputValue(baseValue);
                 return;
             }
 
+            // Append new tag
             finalValue = `${baseValue},${newValue.trim()}`;
             tagAdded = true;
         } else {
             finalValue = newValue.trim();
         }
 
+        // Update ref immediately so subsequent appends use the latest value
         valueRef.current = finalValue;
         onSelectionChange(
             filterKey,
-            finalValue ? { type: 'text', value: finalValue } : null,
+            finalValue
+                ? {
+                    type: 'text',
+                    value: finalValue,
+                }
+                : null,
         );
 
+        // Clear input if requested (typically after selecting from dropdown)
         if (clearInput && tagAdded) {
-            shouldSkipSyncRef.current = true;
+            shouldSkipSyncRef.current = true; // Prevent useEffect from syncing back
             setInputValue('');
-            setOptions([]); // Clear options after selection
         } else {
             setInputValue(finalValue);
         }
@@ -940,35 +931,48 @@ const TextFilterControl = ({
                 {isTagFilter ? (
                     <Autocomplete
                         freeSolo
-                        open={open}
-                        onOpen={() => setOpen(true)}
-                        onClose={() => setOpen(false)}
-                        options={options}
-                        loading={loading}
-                        value={null} // Controlled by inputValue
+                        options={tagOptions}
+                        value={null}
                         inputValue={inputValue}
-                        onInputChange={(_, newInputValue, reason) => {
-                            if (reason === 'input') {
-                                setInputValue(newInputValue);
-                                handleSearch(newInputValue);
-                                setOpen(true);
-                            } else if (reason === 'reset') {
-                                // Don't clear input on reset (blur/select)
-                                // setInputValue(newInputValue); 
-                            } else {
-                                setInputValue(newInputValue);
-                            }
+                        onInputChange={(_, newInputValue) => {
+                            setInputValue(newInputValue);
                         }}
                         onChange={(_, newValue) => {
-                            const tagValue = typeof newValue === 'string' ? newValue : newValue?.canonical || '';
+                            // When selecting from dropdown, append to existing tags
+                            const tagValue = typeof newValue === 'string' ? newValue : newValue || '';
                             if (tagValue) {
-                                handleChange(tagValue, true, true);
-                                setOpen(false);
+                                handleChange(tagValue, true, true); // true = append mode, true = clear input after
                             }
                         }}
-                        getOptionLabel={(option) => (typeof option === 'string' ? option : option.canonical)}
-                        filterOptions={(x) => x} // Disable built-in filtering, we do it server-side
-                        noOptionsText={inputValue.length < 2 ? "Type to search..." : "No tags found"}
+                        open={forceOpen ? true : undefined}
+                        onOpen={() => {
+                            if (tagOptions.length > 0) {
+                                setForceOpen(true);
+                            }
+                        }}
+                        onClose={() => setForceOpen(false)}
+                        openOnFocus={tagOptions.length > 0}
+                        disableCloseOnSelect={false}
+                        disableListWrap={false}
+                        disablePortal={false}
+                        autoHighlight
+                        selectOnFocus
+                        clearOnBlur={false}
+                        handleHomeEndKeys
+                        getOptionLabel={(option) => (typeof option === 'string' ? option : option)}
+                        isOptionEqualToValue={() => false}
+                        filterOptions={(options, { inputValue: filterInput }) => {
+                            if (!filterInput || filterInput.trim() === '') {
+                                // Show first 50 options when input is empty
+                                return options.slice(0, 50);
+                            }
+                            const normalized = filterInput.toLowerCase().trim();
+                            return options.filter(opt =>
+                                opt.toLowerCase().includes(normalized)
+                            ).slice(0, 50);
+                        }}
+                        noOptionsText="No tags found"
+                        loadingText="Loading tags..."
                         renderInput={(params) => (
                             <TextField
                                 {...params}
@@ -976,19 +980,44 @@ const TextFilterControl = ({
                                 variant="standard"
                                 fullWidth
                                 autoComplete="off"
-                                onBlur={() => {
-                                    // Commit manually typed value when blurring if it's not empty
-                                    if (inputValue && inputValue.trim() && !open) {
-                                        // Only if not selecting from dropdown
-                                        // This part is tricky with Autocomplete, usually better to let user select or press enter
+                                onFocus={() => {
+                                    // Force open if we have options
+                                    if (tagOptions.length > 0) {
+                                        setForceOpen(true);
+                                        clickedBeforeLoadRef.current = false;
+                                    } else {
+                                        clickedBeforeLoadRef.current = true;
                                     }
                                 }}
+                                onClick={() => {
+                                    // Force open when clicked if we have options
+                                    if (tagOptions.length > 0) {
+                                        setForceOpen(true);
+                                        clickedBeforeLoadRef.current = false;
+                                    } else {
+                                        clickedBeforeLoadRef.current = true;
+                                    }
+                                }}
+                                onBlur={() => {
+                                    // Delay closing to allow option selection
+                                    setTimeout(() => {
+                                        // Commit manually typed value when blurring
+                                        if (inputValue && inputValue.trim()) {
+                                            // For tag filters, append and clear input; for others, replace
+                                            const shouldAppend = isTagFilter && value && value.trim();
+                                            handleChange(inputValue.trim(), shouldAppend, shouldAppend);
+                                        }
+                                        setForceOpen(false);
+                                    }, 200);
+                                }}
                                 onKeyDown={(event) => {
+                                    // Commit value on Enter
                                     if (event.key === 'Enter' && inputValue && inputValue.trim()) {
                                         event.preventDefault();
+                                        // For tag filters, append and clear input; for others, replace
                                         const shouldAppend = isTagFilter && value && value.trim();
-                                        handleChange(inputValue.trim(), !!shouldAppend, !!shouldAppend);
-                                        setOpen(false);
+                                        handleChange(inputValue.trim(), shouldAppend, shouldAppend); // append if tag filter, clear if appending
+                                        setIsOpen(false);
                                     }
                                 }}
                                 sx={{
@@ -1010,31 +1039,33 @@ const TextFilterControl = ({
                                 InputProps={{
                                     ...params.InputProps,
                                     endAdornment: (
-                                        <React.Fragment>
-                                            {loading ? <CircularProgress color="inherit" size={20} /> : null}
-                                            {params.InputProps.endAdornment}
-                                        </React.Fragment>
+                                        <InputAdornment position="end">
+                                            <SearchIcon fontSize="small" />
+                                        </InputAdornment>
                                     ),
                                 }}
                             />
                         )}
-                        renderOption={(props, option) => {
-                            const { key, ...otherProps } = props;
-                            return (
-                                <li {...otherProps} key={option.canonical}>
-                                    <Stack sx={{ width: '100%' }}>
-                                        <Typography variant="body2" sx={{ color: '#fff' }}>
-                                            {option.canonical}
-                                        </Typography>
-                                        {option.matchType === 'alias' && (
-                                            <Typography variant="caption" sx={{ color: alpha('#fff', 0.5) }}>
-                                                Matches alias: {option.aliases.find(a => a.includes(inputValue.toLowerCase())) || 'alias'}
-                                            </Typography>
-                                        )}
-                                    </Stack>
-                                </li>
-                            );
+                        PopperProps={{
+                            style: { zIndex: 1300 },
+                            placement: 'bottom-start',
+                            disablePortal: false,
                         }}
+                        ListboxProps={{
+                            style: { maxHeight: '300px' },
+                        }}
+                        renderOption={(props, option) => (
+                            <li
+                                {...props}
+                                key={option}
+                                style={{
+                                    backgroundColor: 'transparent',
+                                    color: '#fff',
+                                }}
+                            >
+                                <Typography variant="body2">{option}</Typography>
+                            </li>
+                        )}
                         componentsProps={{
                             paper: {
                                 sx: {
@@ -1046,6 +1077,7 @@ const TextFilterControl = ({
                                     '& .MuiAutocomplete-listbox': {
                                         padding: 0,
                                         '& .MuiAutocomplete-option': {
+                                            color: '#fff',
                                             padding: '8px 16px',
                                             '&:hover, &.Mui-focused': {
                                                 backgroundColor: alpha('#ea4c89', 0.15),
@@ -1063,9 +1095,15 @@ const TextFilterControl = ({
                         }}
                         sx={{
                             flex: 1,
-                            '& .MuiAutocomplete-popupIndicator': { display: 'none' },
-                            '& .MuiAutocomplete-clearIndicator': { color: alpha(supportColor, 0.5) },
-                            '& .MuiAutocomplete-inputRoot': { paddingRight: '14px !important' },
+                            '& .MuiAutocomplete-popupIndicator': {
+                                display: 'none', // Hide popup indicator for cleaner look
+                            },
+                            '& .MuiAutocomplete-clearIndicator': {
+                                color: alpha(supportColor, 0.5),
+                            },
+                            '& .MuiAutocomplete-inputRoot': {
+                                paddingRight: '14px !important', // Adjust padding since we hide popup indicator
+                            },
                         }}
                     />
                 ) : (
@@ -1412,37 +1450,131 @@ export const ModeOneFilterPanel = ({
         try {
             await ensureDatabaseReady();
 
-            // Get recommendations for each active tag
-            const allRecommendations = new Map<string, number>();
+            // Track recommendations with their score (higher = more tags recommend it)
+            // Score uses exponential boost for cross-matches: base + (sources * multiplier)
+            const recommendationScores = new Map<string, { score: number; sources: string[]; baseWeight: number }>();
 
+            // Normalize tag for comparison (lowercase, replace underscores/hyphens with spaces)
+            const normalizeTag = (tag: string) => tag.toLowerCase().replace(/[_-]/g, ' ').trim();
+
+            // Helper to check if a tag is already active
+            const isActiveTag = (rec: string) => {
+                const normalizedRec = normalizeTag(rec);
+                return activeTags.some(active => {
+                    const cleanActive = normalizeTag(active.replace(/^(?:male|female):\s*/i, ''));
+                    return cleanActive === normalizedRec ||
+                        cleanActive.includes(normalizedRec) ||
+                        normalizedRec.includes(cleanActive);
+                });
+            };
+
+            // Helper to add a recommendation with source tracking
+            // Cross-match bonus: each additional source adds exponentially more value
+            const addRecommendation = (rec: string, sourceTag: string, weight: number = 1) => {
+                if (isActiveTag(rec)) return;
+
+                // Normalize the recommendation for consistent grouping
+                const normalizedRec = rec.toLowerCase().trim();
+
+                const existing = recommendationScores.get(normalizedRec) || { score: 0, sources: [], baseWeight: 0 };
+                existing.baseWeight += weight;
+
+                if (!existing.sources.includes(sourceTag)) {
+                    existing.sources.push(sourceTag);
+                }
+
+                // Score formula: baseWeight * (1 + sources.length * 2)
+                // This gives massive boost to cross-matched tags
+                // 1 source: baseWeight * 3
+                // 2 sources: baseWeight * 5
+                // 3 sources: baseWeight * 7
+                existing.score = existing.baseWeight * (1 + existing.sources.length * 2);
+
+                recommendationScores.set(normalizedRec, existing);
+            };
+
+            console.log(`[Suggestions] Getting recommendations for ${activeTags.length} tags:`, activeTags);
+
+            // Collect recommendations from ALL active tags
             for (const tag of activeTags) {
-                // Clean tag (remove gender prefix)
+                // Clean tag (remove gender prefix and normalize)
                 const cleanTag = tag.replace(/^(?:male|female):\s*/i, '').trim();
                 if (!cleanTag) continue;
 
-                try {
-                    const recommendations = await getRecommendedTags(cleanTag, { limit: 20 });
-                    recommendations.forEach(rec => {
-                        // Skip if it's already an active tag
-                        const isActive = activeTags.some(active =>
-                            active.toLowerCase().includes(rec.toLowerCase()) ||
-                            rec.toLowerCase().includes(active.toLowerCase())
-                        );
-                        if (!isActive) {
-                            allRecommendations.set(rec, (allRecommendations.get(rec) || 0) + 1);
+                // Try multiple variations of the tag name
+                const tagVariations = [
+                    cleanTag,
+                    cleanTag.replace(/ /g, '_'),
+                    cleanTag.replace(/_/g, ' '),
+                    cleanTag.toLowerCase(),
+                ];
+
+                let foundRecommendations = false;
+
+                for (const tagVariant of tagVariations) {
+                    try {
+                        // Get recommended tags (weight: 3 - direct recommendations are strongest)
+                        const recommendations = await getRecommendedTags(tagVariant, { limit: 50 });
+                        if (recommendations.length > 0) {
+                            console.log(`[Suggestions] Found ${recommendations.length} recommendations for "${tagVariant}"`);
+                            recommendations.forEach(rec => addRecommendation(rec, cleanTag, 3));
+                            foundRecommendations = true;
                         }
-                    });
-                } catch (error) {
-                    console.warn(`Failed to get recommendations for tag ${cleanTag}:`, error);
+
+                        // Also get related tags (weight: 2 - related tags are secondary)
+                        const tagData = await getCustomTag(tagVariant);
+                        if (tagData?.related && Array.isArray(tagData.related)) {
+                            console.log(`[Suggestions] Found ${tagData.related.length} related tags for "${tagVariant}"`);
+                            tagData.related.slice(0, 30).forEach((rec: string) => addRecommendation(rec, cleanTag, 2));
+                            foundRecommendations = true;
+                        }
+
+                        // Also check aliases/recommended from tag data
+                        if (tagData?.recommended && Array.isArray(tagData.recommended)) {
+                            tagData.recommended.slice(0, 30).forEach((rec: string) => addRecommendation(rec, cleanTag, 3));
+                            foundRecommendations = true;
+                        }
+
+                        if (foundRecommendations) break; // Found data, no need to try other variations
+                    } catch (error) {
+                        // Continue to next variation
+                    }
+                }
+
+                if (!foundRecommendations) {
+                    console.log(`[Suggestions] No recommendations found for any variation of "${cleanTag}"`);
                 }
             }
 
-            // Sort by frequency (most recommended first) and take top 20
-            const sorted = Array.from(allRecommendations.entries())
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 20)
-                .map(([tag]) => tag);
+            console.log(`[Suggestions] Total unique recommendations: ${recommendationScores.size}`);
 
+            // Sort by score (cross-matched tags rank MUCH higher due to exponential scoring)
+            const sorted = Array.from(recommendationScores.entries())
+                .sort((a, b) => {
+                    // Primary sort: by number of sources (cross-matches first!)
+                    if (b[1].sources.length !== a[1].sources.length) {
+                        return b[1].sources.length - a[1].sources.length;
+                    }
+                    // Secondary sort: by score (descending)
+                    if (b[1].score !== a[1].score) {
+                        return b[1].score - a[1].score;
+                    }
+                    // Tertiary sort: alphabetically
+                    return a[0].localeCompare(b[0]);
+                })
+                .slice(0, 40)
+                .map(([tag, data]) => {
+                    // Add visual indicators based on number of sources
+                    if (data.sources.length >= 3) {
+                        return `🔥 ${tag} (${data.sources.length})`; // Fire for 3+ sources
+                    }
+                    if (data.sources.length === 2) {
+                        return `⭐ ${tag} (2)`; // Star for 2 sources
+                    }
+                    return tag;
+                });
+
+            console.log(`[Suggestions] Final sorted recommendations:`, sorted.slice(0, 10));
             setRecommendedTags(sorted);
         } catch (error) {
             console.error('Failed to get recommendations:', error);
@@ -1581,42 +1713,86 @@ export const ModeOneFilterPanel = ({
             maxWidth="md"
             PaperProps={{
                 sx: {
-                    backgroundColor: '#121212',
-                    backgroundImage: 'none',
-                    border: `2px solid ${alpha('#ea4c89', 0.3)}`,
-                    boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.2)}`,
+                    backgroundColor: '#0f0f1a',
+                    background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 50%, #0f0f1a 100%)',
+                    border: `1px solid ${alpha('#ea4c89', 0.4)}`,
+                    borderRadius: '16px',
+                    boxShadow: `0 25px 50px -12px rgba(0,0,0,0.8), 0 0 0 1px ${alpha('#ea4c89', 0.1)}`,
+                    overflow: 'hidden',
+                },
+            }}
+            slotProps={{
+                backdrop: {
+                    sx: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.85)',
+                        backdropFilter: 'blur(8px)',
+                    },
                 },
             }}
         >
             <DialogTitle
                 sx={{
-                    pb: 2,
-                    pt: 2.5,
-                    backgroundColor: '#1a1a1a',
-                    borderBottom: `2px solid ${alpha('#ea4c89', 0.3)}`,
+                    pb: 3,
+                    pt: 3,
+                    px: 3,
+                    background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+                    borderBottom: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                    position: 'relative',
+                    '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: '2px',
+                        background: 'linear-gradient(90deg, transparent, #ea4c89, #f082ac, #ea4c89, transparent)',
+                    },
                 }}
             >
-                <Stack direction="row" alignItems="center" spacing={1.5}>
+                <Stack direction="row" alignItems="center" spacing={2}>
                     <Box
                         sx={{
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            width: 40,
-                            height: 40,
-                            borderRadius: '8px',
-                            background: `linear-gradient(135deg, ${alpha('#ea4c89', 0.2)}, ${alpha('#f082ac', 0.1)})`,
-                            border: `1px solid ${alpha('#ea4c89', 0.3)}`,
+                            width: 48,
+                            height: 48,
+                            borderRadius: '12px',
+                            background: 'linear-gradient(135deg, #ea4c89 0%, #f082ac 100%)',
+                            boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}`,
+                            animation: 'pulse-glow 2s ease-in-out infinite',
+                            '@keyframes pulse-glow': {
+                                '0%, 100%': { boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}` },
+                                '50%': { boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.6)}` },
+                            },
                         }}
                     >
-                        <TuneIcon sx={{ color: '#ea4c89', fontSize: 24 }} />
+                        <TuneIcon sx={{ color: '#fff', fontSize: 26 }} />
                     </Box>
-                    <Stack spacing={0.5}>
-                        <Typography variant="h5" sx={{ color: '#ea4c89', fontWeight: 700, lineHeight: 1.2 }}>
+                    <Stack spacing={0.25}>
+                        <Typography
+                            variant="h5"
+                            sx={{
+                                background: 'linear-gradient(135deg, #fff 0%, #f082ac 100%)',
+                                backgroundClip: 'text',
+                                WebkitBackgroundClip: 'text',
+                                WebkitTextFillColor: 'transparent',
+                                fontWeight: 800,
+                                lineHeight: 1.2,
+                                letterSpacing: '-0.5px',
+                            }}
+                        >
                             {t('modeOne.filters.title')}
                         </Typography>
-                        <Typography variant="caption" sx={{ color: alpha('#fff', 0.6), fontSize: '0.75rem' }}>
-                            Refine your search with powerful filters
+                        <Typography
+                            variant="caption"
+                            sx={{
+                                color: alpha('#fff', 0.5),
+                                fontSize: '0.8rem',
+                                letterSpacing: '0.5px',
+                            }}
+                        >
+                            Find exactly what you're looking for
                         </Typography>
                     </Stack>
                 </Stack>
@@ -1626,13 +1802,17 @@ export const ModeOneFilterPanel = ({
                 sx={{
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: 2,
-                    backgroundColor: '#121212',
+                    gap: 2.5,
+                    backgroundColor: '#12121f',
+                    background: 'linear-gradient(180deg, #16213e 0%, #12121f 100%)',
                     borderTop: 'none',
-                    borderBottom: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                    borderBottom: 'none',
+                    py: 3,
+                    px: 3,
                 }}
             >
-                <TextField
+                {/* Search query input - Commented out */}
+                {/* <TextField
                     label={t('modeOne.filters.queryLabel')}
                     value={query}
                     onChange={(event) => onQueryChange(event.target.value)}
@@ -1646,13 +1826,26 @@ export const ModeOneFilterPanel = ({
                         ),
                     }}
                     autoComplete="off"
-                />
-                <Box
+                /> */}
+                {/* Toggle switches (Live Updates, Strict Only) - Commented out */}
+                {/* <Box
                     sx={{
-                        backgroundColor: alpha('#ea4c89', 0.05),
-                        border: `1px solid ${alpha('#ea4c89', 0.15)}`,
-                        borderRadius: 2,
-                        p: 2,
+                        backgroundColor: '#1a1a2e',
+                        background: 'linear-gradient(135deg, #1f1f3a 0%, #1a1a2e 100%)',
+                        border: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                        borderRadius: '12px',
+                        p: 2.5,
+                        position: 'relative',
+                        overflow: 'hidden',
+                        '&::before': {
+                            content: '""',
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: '1px',
+                            background: 'linear-gradient(90deg, transparent, #ea4c89, transparent)',
+                        },
                     }}
                 >
                     <Stack spacing={1.5}>
@@ -1683,10 +1876,10 @@ export const ModeOneFilterPanel = ({
                                     }
                                     label={
                                         <Stack direction="row" spacing={0.5} alignItems="center">
-                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem' }}>
+                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem', fontWeight: 500 }}>
                                                 {liveUpdatesLabel}
                                             </Typography>
-                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#fff', 0.5) }} />
+                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#ea4c89', 0.6) }} />
                                         </Stack>
                                     }
                                 />
@@ -1709,10 +1902,10 @@ export const ModeOneFilterPanel = ({
                                     }
                                     label={
                                         <Stack direction="row" spacing={0.5} alignItems="center">
-                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem' }}>
+                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem', fontWeight: 500 }}>
                                                 {t('modeOne.filters.strictOnly')}
                                             </Typography>
-                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#fff', 0.5) }} />
+                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#ea4c89', 0.6) }} />
                                         </Stack>
                                     }
                                 />
@@ -1724,22 +1917,23 @@ export const ModeOneFilterPanel = ({
                                 spacing={1}
                                 alignItems="center"
                                 sx={{
-                                    backgroundColor: alpha('#ff9800', 0.1),
-                                    border: `1px solid ${alpha('#ff9800', 0.3)}`,
-                                    borderRadius: 1,
-                                    p: 1,
+                                    backgroundColor: alpha('#ff9800', 0.15),
+                                    border: `1px solid ${alpha('#ff9800', 0.4)}`,
+                                    borderRadius: '8px',
+                                    p: 1.5,
                                 }}
                             >
                                 <Box
                                     sx={{
-                                        width: 8,
-                                        height: 8,
+                                        width: 10,
+                                        height: 10,
                                         borderRadius: '50%',
                                         backgroundColor: '#ff9800',
+                                        boxShadow: `0 0 8px ${alpha('#ff9800', 0.6)}`,
                                         animation: 'pulse 2s infinite',
                                         '@keyframes pulse': {
-                                            '0%, 100%': { opacity: 1 },
-                                            '50%': { opacity: 0.5 },
+                                            '0%, 100%': { opacity: 1, transform: 'scale(1)' },
+                                            '50%': { opacity: 0.6, transform: 'scale(0.9)' },
                                         },
                                     }}
                                 />
@@ -1747,8 +1941,8 @@ export const ModeOneFilterPanel = ({
                                     variant="caption"
                                     sx={{
                                         color: '#ff9800',
-                                        fontWeight: 500,
-                                        fontSize: '0.8rem',
+                                        fontWeight: 600,
+                                        fontSize: '0.85rem',
                                     }}
                                 >
                                     {liveUpdatesPendingHint}
@@ -1756,8 +1950,9 @@ export const ModeOneFilterPanel = ({
                             </Stack>
                         )}
                     </Stack>
-                </Box>
-                <Box
+                </Box> */}
+                {/* Quick Tag Search with AI - Commented out: no tag database backing */}
+                {/* <Box
                     sx={{
                         backgroundColor: alpha('#ea4c89', 0.05),
                         border: `1px solid ${alpha('#ea4c89', 0.15)}`,
@@ -1936,38 +2131,61 @@ export const ModeOneFilterPanel = ({
                             {tagSearchFeedback}
                         </Typography>
                     </Stack>
-                </Box>
-                <Divider sx={{ borderColor: alpha('#ea4c89', 0.1) }} />
+                </Box> */}
+                {/* <Divider sx={{ borderColor: alpha('#ea4c89', 0.1) }} /> */}
                 {!!activeFilterChips.length && (
                     <Box
                         sx={{
-                            backgroundColor: alpha('#4caf50', 0.05),
-                            border: `1px solid ${alpha('#4caf50', 0.2)}`,
-                            borderRadius: 2,
-                            p: 2,
+                            backgroundColor: '#1a2a2e',
+                            background: 'linear-gradient(135deg, #1a2f2e 0%, #1a2a2e 100%)',
+                            border: `1px solid ${alpha('#00d9a5', 0.3)}`,
+                            borderRadius: '12px',
+                            p: 2.5,
+                            position: 'relative',
+                            overflow: 'hidden',
+                            '&::before': {
+                                content: '""',
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                height: '2px',
+                                background: 'linear-gradient(90deg, transparent, #00d9a5, transparent)',
+                            },
                         }}
                     >
                         <Stack spacing={1.5}>
                             <Stack direction="row" alignItems="center" spacing={1} justifyContent="space-between">
-                                <Stack direction="row" alignItems="center" spacing={1}>
+                                <Stack direction="row" alignItems="center" spacing={1.5}>
                                     <Box
                                         sx={{
                                             display: 'flex',
                                             alignItems: 'center',
                                             justifyContent: 'center',
-                                            minWidth: 24,
-                                            height: 24,
-                                            borderRadius: '50%',
-                                            backgroundColor: '#4caf50',
+                                            minWidth: 28,
+                                            height: 28,
+                                            borderRadius: '8px',
+                                            background: 'linear-gradient(135deg, #00d9a5 0%, #00b894 100%)',
                                             color: '#fff',
-                                            fontSize: '0.75rem',
+                                            fontSize: '0.8rem',
                                             fontWeight: 700,
+                                            boxShadow: `0 4px 12px ${alpha('#00d9a5', 0.4)}`,
                                         }}
                                     >
                                         {activeFilterChips.length}
                                     </Box>
-                                    <Typography variant="subtitle2" sx={{ color: '#4caf50', fontWeight: 600 }}>
-                                        {t('modeOne.filters.active')}
+                                    <Typography
+                                        variant="subtitle2"
+                                        sx={{
+                                            background: 'linear-gradient(135deg, #00d9a5 0%, #00b894 100%)',
+                                            backgroundClip: 'text',
+                                            WebkitBackgroundClip: 'text',
+                                            WebkitTextFillColor: 'transparent',
+                                            fontWeight: 700,
+                                            fontSize: '0.9rem',
+                                        }}
+                                    >
+                                        Active Filters
                                     </Typography>
                                 </Stack>
                                 {activeTags.length > 0 && (
@@ -1977,22 +2195,26 @@ export const ModeOneFilterPanel = ({
                                         onClick={handleGetRecommendations}
                                         disabled={isLoadingRecommendations}
                                         sx={{
-                                            borderColor: alpha('#ea4c89', 0.5),
-                                            color: '#ea4c89',
+                                            borderColor: alpha('#ea4c89', 0.4),
+                                            color: '#f082ac',
                                             fontSize: '0.75rem',
                                             textTransform: 'none',
-                                            px: 1.5,
+                                            px: 2,
+                                            py: 0.5,
+                                            borderRadius: '8px',
+                                            transition: 'all 0.3s ease',
                                             '&:hover': {
                                                 borderColor: '#ea4c89',
                                                 backgroundColor: alpha('#ea4c89', 0.1),
+                                                transform: 'translateY(-1px)',
                                             },
                                             '&:disabled': {
-                                                borderColor: alpha('#ea4c89', 0.2),
-                                                color: alpha('#ea4c89', 0.5),
+                                                borderColor: alpha('#ea4c89', 0.15),
+                                                color: alpha('#ea4c89', 0.4),
                                             },
                                         }}
                                     >
-                                        {isLoadingRecommendations ? 'Loading...' : 'Recommend Tags'}
+                                        {isLoadingRecommendations ? '⏳ Loading...' : '💡 Get Suggestions'}
                                     </Button>
                                 )}
                             </Stack>
@@ -2004,25 +2226,31 @@ export const ModeOneFilterPanel = ({
                                         onDelete={chip.onDelete}
                                         size="small"
                                         sx={{
-                                            backgroundColor: alpha('#4caf50', 0.15),
+                                            backgroundColor: '#1f3a3a',
                                             color: '#fff',
-                                            border: `1px solid ${alpha('#4caf50', 0.3)}`,
-                                            fontWeight: 500,
+                                            border: `1px solid ${alpha('#00d9a5', 0.4)}`,
+                                            fontWeight: 600,
                                             fontSize: '0.85rem',
+                                            borderRadius: '8px',
+                                            transition: 'all 0.3s ease',
                                             '& .MuiChip-label': {
-                                                paddingLeft: '10px',
-                                                paddingRight: '6px',
+                                                paddingLeft: '12px',
+                                                paddingRight: '8px',
                                             },
                                             '& .MuiChip-deleteIcon': {
-                                                color: alpha('#4caf50', 0.7),
+                                                color: alpha('#00d9a5', 0.7),
                                                 fontSize: '18px',
+                                                transition: 'all 0.2s ease',
                                                 '&:hover': {
-                                                    color: '#4caf50',
+                                                    color: '#00d9a5',
+                                                    transform: 'scale(1.1)',
                                                 },
                                             },
                                             '&:hover': {
-                                                backgroundColor: alpha('#4caf50', 0.2),
-                                                borderColor: alpha('#4caf50', 0.5),
+                                                backgroundColor: '#255a5a',
+                                                borderColor: alpha('#00d9a5', 0.6),
+                                                transform: 'translateY(-1px)',
+                                                boxShadow: `0 4px 12px ${alpha('#00d9a5', 0.2)}`,
                                             },
                                         }}
                                     />
@@ -2031,109 +2259,147 @@ export const ModeOneFilterPanel = ({
                         </Stack>
                     </Box>
                 )}
-                <Divider sx={{ borderColor: alpha('#ea4c89', 0.1) }} />
 
                 {aggregatedFilters.length ? (
                     <Stack spacing={2}>
-                        {/* Common Filters */}
+                        {/* Filter Options - Always visible */}
                         {commonFilters.length > 0 && (
-                            <Accordion
-                                expanded={expandedCommon}
-                                onChange={() => setExpandedCommon(!expandedCommon)}
+                            <Box
                                 sx={{
-                                    backgroundColor: '#1a1a1a',
-                                    backgroundImage: 'none',
-                                    border: `1px solid ${alpha('#ea4c89', 0.2)}`,
-                                    '&:before': { display: 'none' },
-                                    boxShadow: `0 2px 8px ${alpha('#ea4c89', 0.1)}`,
+                                    backgroundColor: '#1a1a2e',
+                                    border: `1px solid ${alpha('#e94560', 0.25)}`,
+                                    borderRadius: '12px',
+                                    overflow: 'hidden',
+                                    boxShadow: `0 4px 20px ${alpha('#000', 0.3)}`,
                                 }}
                             >
-                                <AccordionSummary
-                                    expandIcon={<ExpandMoreIcon sx={{ color: '#ea4c89' }} />}
+                                {/* Header */}
+                                <Box
                                     sx={{
-                                        backgroundColor: '#1a1a1a',
-                                        borderBottom: expandedCommon ? `1px solid ${alpha('#ea4c89', 0.2)}` : 'none',
-                                        '& .MuiAccordionSummary-content': {
-                                            margin: '12px 0',
-                                        },
+                                        backgroundColor: '#1f1f3a',
+                                        px: 2.5,
+                                        py: 2,
+                                        borderBottom: `1px solid ${alpha('#e94560', 0.15)}`,
                                     }}
                                 >
-                                    <Stack direction="row" alignItems="center" spacing={1.5} sx={{ width: '100%' }}>
-                                        <Typography variant="h6" sx={{ color: '#ea4c89', fontWeight: 600 }}>
-                                            Common Filters
+                                    <Stack direction="row" alignItems="center" spacing={1.5}>
+                                        <Typography
+                                            variant="h6"
+                                            sx={{
+                                                background: 'linear-gradient(135deg, #e94560 0%, #ff6b9d 100%)',
+                                                backgroundClip: 'text',
+                                                WebkitBackgroundClip: 'text',
+                                                WebkitTextFillColor: 'transparent',
+                                                fontWeight: 700,
+                                                fontSize: '1.1rem',
+                                            }}
+                                        >
+                                            🎯 Filter Options
                                         </Typography>
                                         {commonActiveCount > 0 && (
                                             <Chip
                                                 label={`${commonActiveCount} active`}
                                                 size="small"
                                                 sx={{
-                                                    backgroundColor: '#4caf50',
+                                                    background: 'linear-gradient(135deg, #00d9a5 0%, #00b894 100%)',
                                                     color: '#fff',
-                                                    fontWeight: 600,
+                                                    fontWeight: 700,
                                                     fontSize: '0.7rem',
-                                                    height: 22,
+                                                    height: 24,
+                                                    borderRadius: '12px',
+                                                    boxShadow: `0 2px 8px ${alpha('#00d9a5', 0.4)}`,
                                                 }}
                                             />
                                         )}
                                     </Stack>
-                                </AccordionSummary>
-                                <AccordionDetails sx={{ backgroundColor: '#121212', p: 2 }}>
-                                    <Stack spacing={1.5}>
+                                </Box>
+                                {/* Content */}
+                                <Box
+                                    sx={{
+                                        backgroundColor: '#15152a',
+                                        p: 2.5,
+                                    }}
+                                >
+                                    <Stack spacing={2.5}>
                                         {commonFilters.map((filter) => renderFilterControl(filter))}
                                     </Stack>
-                                </AccordionDetails>
-                            </Accordion>
+                                </Box>
+                            </Box>
                         )}
 
-                        {/* Advanced Filters */}
-                        {advancedFilters.length > 0 && (
+                        {/* Advanced Filters - Commented out: All advanced filters removed (no tag database backing) */}
+                        {/* {advancedFilters.length > 0 && (
                             <Accordion
                                 expanded={expandedAdvanced}
                                 onChange={() => setExpandedAdvanced(!expandedAdvanced)}
                                 sx={{
-                                    backgroundColor: '#1a1a1a',
-                                    backgroundImage: 'none',
-                                    border: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                                    backgroundColor: '#1a1a2e',
+                                    background: 'linear-gradient(135deg, #1f1f3a 0%, #1a1a2e 100%)',
+                                    border: `1px solid ${alpha('#6c5ce7', 0.25)}`,
+                                    borderRadius: '12px !important',
                                     '&:before': { display: 'none' },
-                                    boxShadow: `0 2px 8px ${alpha('#ea4c89', 0.1)}`,
+                                    boxShadow: `0 4px 20px ${alpha('#000', 0.3)}`,
+                                    transition: 'all 0.3s ease',
+                                    '&:hover': {
+                                        borderColor: alpha('#6c5ce7', 0.4),
+                                        boxShadow: `0 8px 30px ${alpha('#6c5ce7', 0.15)}`,
+                                    },
+                                    overflow: 'hidden',
                                 }}
                             >
                                 <AccordionSummary
-                                    expandIcon={<ExpandMoreIcon sx={{ color: '#ea4c89' }} />}
+                                    expandIcon={<ExpandMoreIcon sx={{ color: '#6c5ce7' }} />}
                                     sx={{
-                                        backgroundColor: '#1a1a1a',
-                                        borderBottom: expandedAdvanced ? `1px solid ${alpha('#ea4c89', 0.2)}` : 'none',
+                                        backgroundColor: '#1a1a2e',
+                                        borderBottom: expandedAdvanced ? `1px solid ${alpha('#6c5ce7', 0.15)}` : 'none',
                                         '& .MuiAccordionSummary-content': {
                                             margin: '12px 0',
                                         },
                                     }}
                                 >
                                     <Stack direction="row" alignItems="center" spacing={1.5} sx={{ width: '100%' }}>
-                                        <Typography variant="h6" sx={{ color: '#ea4c89', fontWeight: 600 }}>
-                                            Advanced Filters
+                                        <Typography
+                                            variant="h6"
+                                            sx={{
+                                                background: 'linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%)',
+                                                backgroundClip: 'text',
+                                                WebkitBackgroundClip: 'text',
+                                                WebkitTextFillColor: 'transparent',
+                                                fontWeight: 700,
+                                                fontSize: '1.1rem',
+                                            }}
+                                        >
+                                            ⚙️ Advanced Filters
                                         </Typography>
                                         {advancedActiveCount > 0 && (
                                             <Chip
                                                 label={`${advancedActiveCount} active`}
                                                 size="small"
                                                 sx={{
-                                                    backgroundColor: '#4caf50',
+                                                    background: 'linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%)',
                                                     color: '#fff',
-                                                    fontWeight: 600,
+                                                    fontWeight: 700,
                                                     fontSize: '0.7rem',
-                                                    height: 22,
+                                                    height: 24,
+                                                    borderRadius: '12px',
+                                                    boxShadow: `0 2px 8px ${alpha('#6c5ce7', 0.4)}`,
                                                 }}
                                             />
                                         )}
                                     </Stack>
                                 </AccordionSummary>
-                                <AccordionDetails sx={{ backgroundColor: '#121212', p: 2 }}>
-                                    <Stack spacing={1.5}>
+                                <AccordionDetails
+                                    sx={{
+                                        backgroundColor: '#15152a',
+                                        p: 2.5,
+                                    }}
+                                >
+                                    <Stack spacing={2.5}>
                                         {advancedFilters.map((filter) => renderFilterControl(filter))}
                                     </Stack>
                                 </AccordionDetails>
                             </Accordion>
-                        )}
+                        )} */}
                     </Stack>
                 ) : (
                     <Typography variant="body2" color="text.secondary">
@@ -2145,9 +2411,19 @@ export const ModeOneFilterPanel = ({
                 sx={{
                     px: 3,
                     py: 2.5,
-                    backgroundColor: '#1a1a1a',
-                    borderTop: `2px solid ${alpha('#ea4c89', 0.3)}`,
+                    background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+                    borderTop: `1px solid ${alpha('#ea4c89', 0.2)}`,
                     gap: 1.5,
+                    position: 'relative',
+                    '&::after': {
+                        content: '""',
+                        position: 'absolute',
+                        bottom: 0,
+                        left: 0,
+                        right: 0,
+                        height: '2px',
+                        background: 'linear-gradient(90deg, transparent, #ea4c89, #f082ac, #ea4c89, transparent)',
+                    },
                 }}
             >
                 <Tooltip title="Clear all active filters" arrow>
@@ -2157,40 +2433,51 @@ export const ModeOneFilterPanel = ({
                             variant="outlined"
                             disabled={activeFilterChips.length === 0}
                             sx={{
-                                color: '#ea4c89',
-                                borderColor: alpha('#ea4c89', 0.5),
+                                color: '#f082ac',
+                                borderColor: alpha('#ea4c89', 0.4),
                                 fontWeight: 600,
                                 px: 2.5,
+                                py: 1,
+                                borderRadius: '10px',
+                                textTransform: 'none',
+                                fontSize: '0.9rem',
+                                transition: 'all 0.3s ease',
                                 '&:hover': {
                                     borderColor: '#ea4c89',
-                                    backgroundColor: alpha('#ea4c89', 0.08),
+                                    backgroundColor: alpha('#ea4c89', 0.1),
+                                    transform: 'translateY(-2px)',
+                                    boxShadow: `0 4px 12px ${alpha('#ea4c89', 0.2)}`,
                                 },
                                 '&:disabled': {
-                                    borderColor: alpha('#ea4c89', 0.2),
+                                    borderColor: alpha('#ea4c89', 0.15),
                                     color: alpha('#ea4c89', 0.3),
                                 },
                             }}
                         >
-                            {t('modeOne.filters.reset')}
+                            🗑️ Clear All
                         </Button>
                     </span>
                 </Tooltip>
                 <Box sx={{ flex: 1 }} />
                 <Button
                     onClick={onClose}
-                    variant="outlined"
+                    variant="text"
                     sx={{
-                        color: '#999',
-                        borderColor: alpha('#999', 0.3),
+                        color: alpha('#fff', 0.6),
                         fontWeight: 500,
                         px: 2.5,
+                        py: 1,
+                        borderRadius: '10px',
+                        textTransform: 'none',
+                        fontSize: '0.9rem',
+                        transition: 'all 0.3s ease',
                         '&:hover': {
-                            borderColor: '#999',
-                            backgroundColor: alpha('#999', 0.08),
+                            color: '#fff',
+                            backgroundColor: alpha('#fff', 0.05),
                         },
                     }}
                 >
-                    {t('global.button.cancel')}
+                    Cancel
                 </Button>
                 <Tooltip title={liveUpdatesEnabled ? 'Filters are already applied' : 'Apply changes and close'} arrow>
                     <span>
@@ -2202,30 +2489,32 @@ export const ModeOneFilterPanel = ({
                             variant="contained"
                             disabled={!liveUpdatesEnabled && !hasPendingChanges}
                             sx={{
-                                backgroundColor: '#ea4c89',
+                                background: 'linear-gradient(135deg, #ea4c89 0%, #f082ac 100%)',
                                 color: '#fff',
                                 fontWeight: 700,
                                 fontSize: '0.95rem',
                                 px: 4,
-                                py: 1,
-                                boxShadow: `0 4px 12px ${alpha('#ea4c89', 0.3)}`,
+                                py: 1.2,
+                                borderRadius: '10px',
+                                textTransform: 'none',
+                                boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}`,
                                 '&:hover': {
-                                    backgroundColor: '#f082ac',
-                                    boxShadow: `0 6px 16px ${alpha('#ea4c89', 0.4)}`,
-                                    transform: 'translateY(-1px)',
+                                    background: 'linear-gradient(135deg, #f082ac 0%, #ea4c89 100%)',
+                                    boxShadow: `0 12px 28px ${alpha('#ea4c89', 0.5)}`,
+                                    transform: 'translateY(-2px)',
                                 },
                                 '&:active': {
                                     transform: 'translateY(0)',
                                 },
                                 '&:disabled': {
-                                    backgroundColor: alpha('#ea4c89', 0.3),
-                                    color: alpha('#fff', 0.5),
+                                    background: alpha('#ea4c89', 0.2),
+                                    color: alpha('#fff', 0.4),
                                     boxShadow: 'none',
                                 },
-                                transition: 'all 0.2s ease',
+                                transition: 'all 0.3s ease',
                             }}
                         >
-                            {t('global.button.apply')}
+                            ✨ Apply Filters
                         </Button>
                     </span>
                 </Tooltip>
@@ -2274,7 +2563,10 @@ export const ModeOneFilterPanel = ({
                                 Recommended Tags
                             </Typography>
                             <Typography variant="caption" sx={{ color: alpha('#fff', 0.6), fontSize: '0.75rem' }}>
-                                Based on your active tags: {activeTags.join(', ')}
+                                Based on: {activeTags.slice(0, 3).join(', ')}{activeTags.length > 3 ? ` +${activeTags.length - 3} more` : ''}
+                            </Typography>
+                            <Typography variant="caption" sx={{ color: alpha('#ffd700', 0.8), fontSize: '0.7rem' }}>
+                                ⭐ = Recommended by multiple tags (higher relevance)
                             </Typography>
                         </Stack>
                     </Stack>
@@ -2300,13 +2592,18 @@ export const ModeOneFilterPanel = ({
                     ) : (
                         <Stack spacing={1} direction="row" useFlexGap flexWrap="wrap">
                             {recommendedTags.map((tag) => {
+                                // Check if this is a cross-matched tag (recommended by multiple sources)
+                                const isCrossMatch = tag.startsWith('⭐ ');
+                                // Remove the star prefix for processing
+                                const tagWithoutStar = isCrossMatch ? tag.slice(2) : tag;
+
                                 // Determine target filter based on tag or use first available tag filter
                                 let targetFilter = aggregatedFilters.find(f => {
                                     const labelLower = f.label.toLowerCase();
                                     // Check if tag has gender prefix
-                                    if (tag.toLowerCase().startsWith('female:')) {
+                                    if (tagWithoutStar.toLowerCase().startsWith('female:')) {
                                         return labelLower.includes('female') && (TAG_FILTER_LABEL_PATTERN.test(f.label) || isGenderTagFilter(f.label));
-                                    } else if (tag.toLowerCase().startsWith('male:')) {
+                                    } else if (tagWithoutStar.toLowerCase().startsWith('male:')) {
                                         return labelLower.includes('male') && (TAG_FILTER_LABEL_PATTERN.test(f.label) || isGenderTagFilter(f.label));
                                     }
                                     // If no prefix, find first tag filter
@@ -2315,12 +2612,13 @@ export const ModeOneFilterPanel = ({
 
                                 if (!targetFilter) return null;
 
-                                const currentValue = selection[targetFilter.key]?.type === 'text' ? selection[targetFilter.key].value : '';
-                                const existingTags = currentValue ? currentValue.split(',').map(t => t.trim().toLowerCase()).filter(Boolean) : [];
+                                const selValue = selection[targetFilter.key];
+                                const currentValue = selValue?.type === 'text' && typeof selValue.value === 'string' ? selValue.value : '';
+                                const existingTags = currentValue ? currentValue.split(',').map((t: string) => t.trim().toLowerCase()).filter(Boolean) : [];
 
-                                // Clean tag (remove gender prefix)
-                                const cleanTag = tag.replace(/^(?:male|female):\s*/i, '').trim();
-                                const isAlreadyAdded = existingTags.some(existing =>
+                                // Clean tag (remove gender prefix and star)
+                                const cleanTag = tagWithoutStar.replace(/^(?:male|female):\s*/i, '').trim();
+                                const isAlreadyAdded = existingTags.some((existing: string) =>
                                     existing === cleanTag.toLowerCase() ||
                                     existing.includes(cleanTag.toLowerCase()) ||
                                     cleanTag.toLowerCase().includes(existing)
@@ -2343,19 +2641,34 @@ export const ModeOneFilterPanel = ({
                                             });
                                         }}
                                         sx={{
+                                            // Cross-matched tags get gold styling, others get pink
                                             backgroundColor: isAlreadyAdded
                                                 ? alpha('#4caf50', 0.15)
-                                                : alpha('#ea4c89', 0.15),
+                                                : isCrossMatch
+                                                    ? alpha('#ffd700', 0.2)
+                                                    : alpha('#ea4c89', 0.15),
                                             color: '#fff',
                                             border: `1px solid ${isAlreadyAdded
                                                 ? alpha('#4caf50', 0.3)
-                                                : alpha('#ea4c89', 0.3)}`,
+                                                : isCrossMatch
+                                                    ? alpha('#ffd700', 0.5)
+                                                    : alpha('#ea4c89', 0.3)}`,
                                             cursor: isAlreadyAdded ? 'default' : 'pointer',
+                                            fontWeight: isCrossMatch ? 600 : 400,
+                                            boxShadow: isCrossMatch && !isAlreadyAdded
+                                                ? `0 0 8px ${alpha('#ffd700', 0.3)}`
+                                                : 'none',
                                             '&:hover': {
                                                 backgroundColor: isAlreadyAdded
                                                     ? alpha('#4caf50', 0.15)
-                                                    : alpha('#ea4c89', 0.25),
-                                                borderColor: isAlreadyAdded ? alpha('#4caf50', 0.3) : '#ea4c89',
+                                                    : isCrossMatch
+                                                        ? alpha('#ffd700', 0.3)
+                                                        : alpha('#ea4c89', 0.25),
+                                                borderColor: isAlreadyAdded
+                                                    ? alpha('#4caf50', 0.3)
+                                                    : isCrossMatch
+                                                        ? '#ffd700'
+                                                        : '#ea4c89',
                                             },
                                         }}
                                     />

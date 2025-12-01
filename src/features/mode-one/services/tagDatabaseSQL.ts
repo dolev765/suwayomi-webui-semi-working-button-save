@@ -613,8 +613,9 @@ export const loadCustomTagDatabase = async (
     femaleTags: Record<string, any>,
     forceReconvert = false,
 ): Promise<void> => {
-    // If forcing reconversion, clear the existing database
-    if (forceReconvert) {
+    // If forcing reconversion AND not in recovery mode, clear the existing database
+    // During recovery, the database is already set up by attemptDatabaseRecovery
+    if (forceReconvert && !dbRecoveryInProgress) {
         dbInitialized = false;
         db = null;
         // Clear IndexedDB cache
@@ -635,9 +636,12 @@ export const loadCustomTagDatabase = async (
                 }
             }
         }
+        await initDatabase();
+    } else if (!dbRecoveryInProgress) {
+        // Only call initDatabase if not in recovery mode
+        await initDatabase();
     }
-
-    await initDatabase();
+    // During recovery mode, db should already be initialized by attemptDatabaseRecovery
 
     if (!db || !SQL) {
         throw new Error('Database not initialized');
@@ -683,6 +687,8 @@ export const loadCustomTagDatabase = async (
                     database.run('BEGIN TRANSACTION');
                 }
                 dbLog(`✅ Committed batch ${Math.floor(batchStart / BATCH_SIZE) + 1} (${batchEnd} male tags processed)`);
+                // Yield to UI between batches
+                await new Promise(resolve => setTimeout(resolve, 0));
             }
             dbLog(`✅ Processed ${maleEntries.length} male tags`);
 
@@ -711,6 +717,8 @@ export const loadCustomTagDatabase = async (
                     database.run('BEGIN TRANSACTION');
                 }
                 dbLog(`✅ Committed batch ${Math.floor(batchStart / BATCH_SIZE) + 1} (${batchEnd} female tags processed)`);
+                // Yield to UI between batches
+                await new Promise(resolve => setTimeout(resolve, 0));
             }
             dbLog(`✅ Processed ${femaleEntries.length} female tags`);
 
@@ -1958,9 +1966,9 @@ export const forceConvertJSONToSQL = async (): Promise<void> => {
         const femaleCount = Object.keys(femaleTags).filter(k => k !== 'comment').length;
         dbLog(`📊 Found ${maleCount} male tags and ${femaleCount} female tags in JSON files`);
 
-        // Force reconversion by clearing existing database
+        // Convert to SQLite - don't force reconvert if in recovery mode (db already set up)
         dbLog('💾 Converting JSON to SQLite database...');
-        await loadCustomTagDatabase(maleTags, femaleTags, true);
+        await loadCustomTagDatabase(maleTags, femaleTags, !dbRecoveryInProgress);
         dbLog('✅ Force conversion completed - database rebuilt from JSON files');
     } catch (error) {
         dbError('❌ Force conversion failed:', error);
