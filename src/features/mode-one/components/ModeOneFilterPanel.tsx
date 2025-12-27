@@ -26,6 +26,7 @@ import {
     TagSuggestion,
 } from '@/features/mode-one/services/tagSynonyms.ts';
 import { TriState } from '@/lib/graphql/generated/graphql.ts';
+import AddIcon from '@mui/icons-material/Add';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import SearchIcon from '@mui/icons-material/Search';
 import TuneIcon from '@mui/icons-material/Tune';
@@ -37,14 +38,15 @@ import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
-import Divider from '@mui/material/Divider';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import InputAdornment from '@mui/material/InputAdornment';
 import Stack from '@mui/material/Stack';
 import { alpha, keyframes, styled } from '@mui/material/styles';
+import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 // HentaiHere-inspired color scheme
@@ -60,6 +62,22 @@ const COMMON_FILTER_KEYS = [
 ];
 
 const normalizeForMatch = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * Capitalize tag names properly - replaces underscores with spaces and capitalizes each word
+ */
+const capitalizeTag = (tag: string): string => {
+    return tag
+        .replace(/_/g, ' ')
+        .split(' ')
+        .map(word => {
+            if (!word) return '';
+            // Capitalize first letter, keep rest lowercase
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(' ')
+        .trim();
+};
 
 const TAG_SOURCE_VALUE_PRIORITY: ModeOneSourceKey[] = ['hitomi', 'hentai2read', 'ehentai', 'hentaifox'];
 const KNOWN_TAG_CATEGORIES = [
@@ -111,9 +129,10 @@ const normalizeCategory = (value: string | undefined): string | undefined => {
 };
 
 // Check if a filter is a female/male tag filter (these go in common)
+// Use word boundary to avoid substring issues (e.g. 'female' contains 'male')
 const isGenderTagFilter = (filterLabel: string) => {
     const label = filterLabel.toLowerCase();
-    return label.includes('female') || label.includes('male');
+    return /\bfemale\b/.test(label) || /\bmale\b/.test(label);
 };
 
 const levenshteinDistance = (a: string, b: string): number => {
@@ -282,33 +301,15 @@ const SupportIndicator = styled('span', {
 type SelectionHandler = (filterKey: string, value: FilterSelectionValue | null) => void;
 
 const SourcesCaption = ({ supportedSources }: { supportedSources: ModeOneSourceKey[] }) => {
-    const sourceLabels = supportedSources.map((sourceKey) => MODE_ONE_SOURCE_LABELS[sourceKey]).join(', ');
-    const tooltipText = `Available on: ${sourceLabels}`;
-
-    return (
-        <Tooltip title={tooltipText} placement="top" arrow>
-            <Stack direction="row" spacing={0.5} alignItems="center" sx={{ cursor: 'help' }}>
-                <Typography
-                    variant="caption"
-                    sx={{
-                        color: alpha('#ea4c89', 0.7),
-                        fontWeight: 500,
-                        fontSize: '0.7rem',
-                    }}
-                >
-                    {sourceLabels}
-                </Typography>
-                <HelpOutlineIcon sx={{ fontSize: 12, color: alpha('#ea4c89', 0.5) }} />
-            </Stack>
-        </Tooltip>
-    );
+    // Component removed - no longer displaying source labels
+    return null;
 };
 
 const getSupportColor = (count: number) => SUPPORT_COLORS[Math.min(Math.max(count, 0), SUPPORT_COLORS.length - 1)];
 
 const buildSupportLabel = (count: number): string => {
-    if (count === 4) return 'Perfect';
-    if (count === 3) return 'Great';
+    if (count === 4) return '';
+    if (count === 3) return '';
     if (count === 2) return 'Good';
     if (count === 1) return 'Rare';
     return 'None';
@@ -410,10 +411,12 @@ const SelectFilterControl = ({
     return (
         <Stack spacing={1}>
             <SourcesCaption supportedSources={supportedSources} />
-            <TextFieldWrapper supportColor={supportColor} isPulsing={isBurstVisible}>
-                <SupportBurst supportcolor={supportColor} visible={isBurstVisible}>
-                    {supportLabel}
-                </SupportBurst>
+            <TextFieldWrapper supportColor={supportColor} isPulsing={isBurstVisible && !!supportLabel}>
+                {supportLabel && (
+                    <SupportBurst supportcolor={supportColor} visible={isBurstVisible}>
+                        {supportLabel}
+                    </SupportBurst>
+                )}
                 <Autocomplete<TagSuggestion, false, false, false>
                     freeSolo
                     options={options}
@@ -445,7 +448,10 @@ const SelectFilterControl = ({
                             commitValue(inputValue);
                         }
                     }}
-                    getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
+                    getOptionLabel={(option) => {
+                        const label = typeof option === 'string' ? option : option.label;
+                        return capitalizeTag(label);
+                    }}
                     filterOptions={(availableOptions, { inputValue: filterInput }) => {
                         if (!filterInput) {
                             return availableOptions;
@@ -492,15 +498,35 @@ const SelectFilterControl = ({
                                 '& .MuiInput-root': {
                                     color: '#fff',
                                     fontSize: '0.95rem',
+                                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                                    '&:before': {
+                                        borderBottomColor: alpha(supportColor, 0.25),
+                                        transition: 'border-color 0.3s ease',
+                                    },
+                                    '&:hover:not(.Mui-disabled):before': {
+                                        borderBottomColor: alpha(supportColor, 0.6),
+                                        borderBottomWidth: '2px',
+                                    },
+                                    '&.Mui-focused': {
+                                        '&:after': {
+                                            borderBottomColor: supportColor,
+                                            borderBottomWidth: '2px',
+                                            boxShadow: `0 2px 8px ${alpha(supportColor, 0.4)}`,
+                                        },
+                                        '&:before': {
+                                            borderBottomColor: alpha(supportColor, 0.3),
+                                        },
+                                    },
                                 },
-                                '& .MuiInput-root:before': {
-                                    borderBottomColor: alpha(supportColor, 0.25),
-                                },
-                                '& .MuiInput-root:hover:not(.Mui-disabled):before': {
-                                    borderBottomColor: alpha(supportColor, 0.5),
-                                },
-                                '& .MuiInput-root.Mui-focused:after': {
-                                    borderBottomColor: supportColor,
+                                '& .MuiInput-input': {
+                                    '&::placeholder': {
+                                        color: alpha('#fff', 0.5),
+                                        opacity: 1,
+                                        transition: 'color 0.3s ease',
+                                    },
+                                    '&:focus::placeholder': {
+                                        color: alpha(supportColor, 0.6),
+                                    },
                                 },
                             }}
                         />
@@ -510,12 +536,38 @@ const SelectFilterControl = ({
                             {...props}
                             key={option.key}
                             style={{
-                                backgroundColor: '#1a1a1a',
-                                color: '#fff',
-                                borderBottom: `1px solid ${alpha('#ea4c89', 0.1)}`,
+                                backgroundColor: 'transparent',
+                                color: '#fff !important',
+                                opacity: '1 !important',
+                                filter: 'none !important',
                             }}
                         >
-                            <Typography variant="body2">{option.label}</Typography>
+                            <Stack direction="row" alignItems="center" spacing={1.5} sx={{ py: 0.5 }}>
+                                <Box
+                                    sx={{
+                                        width: 6,
+                                        height: 6,
+                                        borderRadius: '50%',
+                                        backgroundColor: alpha(supportColor, 0.6),
+                                        boxShadow: `0 0 8px ${alpha(supportColor, 0.4)}`,
+                                    }}
+                                />
+                                <Typography
+                                    variant="body2"
+                                    sx={{
+                                        fontWeight: 500,
+                                        letterSpacing: '0.02em',
+                                        color: '#fff !important',
+                                        opacity: '1 !important',
+                                        filter: 'none !important',
+                                        textShadow: 'none !important',
+                                        WebkitTextStroke: 'none !important',
+                                        WebkitFontSmoothing: 'antialiased',
+                                    }}
+                                >
+                                    {capitalizeTag(option.label)}
+                                </Typography>
+                            </Stack>
                         </li>
                     )}
                     fullWidth
@@ -523,21 +575,45 @@ const SelectFilterControl = ({
                     componentsProps={{
                         paper: {
                             sx: {
-                                backgroundColor: '#1a1a1a',
-                                backgroundImage: 'none',
-                                border: `1px solid ${alpha('#ea4c89', 0.3)}`,
-                                boxShadow: `0 4px 20px ${alpha('#ea4c89', 0.2)}`,
+                                backgroundColor: '#1a1a1a !important',
+                                background: '#1a1a1a !important',
+                                backgroundImage: 'none !important',
+                                border: `1px solid ${alpha('#ea4c89', 0.4)} !important`,
+                                borderRadius: '12px',
+                                boxShadow: `0 2px 8px ${alpha('#000', 0.5)} !important`,
+                                overflow: 'hidden',
+                                backdropFilter: 'none',
                                 '& .MuiAutocomplete-listbox': {
-                                    padding: 0,
+                                    padding: '8px 0',
+                                    backgroundColor: 'transparent',
                                     '& .MuiAutocomplete-option': {
-                                        color: '#fff',
+                                        color: '#fff !important',
+                                        padding: '12px 20px',
+                                        margin: '2px 8px',
+                                        borderRadius: '8px',
+                                        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                        backgroundColor: 'transparent',
+                                        opacity: '1 !important',
+                                        filter: 'none !important',
+                                        '& *': {
+                                            color: '#fff !important',
+                                            opacity: '1 !important',
+                                            filter: 'none !important',
+                                            textShadow: 'none !important',
+                                            WebkitTextStroke: 'none !important',
+                                        },
                                         '&:hover, &.Mui-focused': {
-                                            backgroundColor: alpha('#ea4c89', 0.15),
+                                            backgroundColor: `${alpha(supportColor, 0.25)} !important`,
+                                            transform: 'translateX(4px)',
+                                            boxShadow: `0 2px 4px ${alpha('#000', 0.3)}`,
                                         },
                                         '&[aria-selected="true"]': {
-                                            backgroundColor: alpha('#ea4c89', 0.25),
+                                            backgroundColor: `${alpha(supportColor, 0.3)} !important`,
+                                            background: `${alpha(supportColor, 0.3)} !important`,
                                             '&:hover, &.Mui-focused': {
-                                                backgroundColor: alpha('#ea4c89', 0.35),
+                                                backgroundColor: `${alpha(supportColor, 0.45)} !important`,
+                                                transform: 'translateX(4px)',
+                                                boxShadow: `0 2px 4px ${alpha('#000', 0.3)}`,
                                             },
                                         },
                                     },
@@ -555,7 +631,9 @@ const SelectFilterControl = ({
                         },
                     }}
                 />
-                <SupportIndicator supportcolor={supportColor}>{supportLabel}</SupportIndicator>
+                {supportLabel && (
+                    <SupportIndicator supportcolor={supportColor}>{supportLabel}</SupportIndicator>
+                )}
             </TextFieldWrapper>
             {!!hintText && (
                 <Typography variant="caption" color="text.secondary">
@@ -813,10 +891,13 @@ const TextFilterControl = ({
     const clickedBeforeLoadRef = useRef(false);
 
     // Determine category from filter label
+    // Use word boundary check to avoid 'female' matching when looking for 'male'
     const tagCategory = useMemo(() => {
         const label = filterLabel.toLowerCase();
-        if (label.includes('female')) return 'female' as const;
-        if (label.includes('male')) return 'male' as const;
+        // Check for 'female' first with word boundary (to not confuse with 'male' substring)
+        if (/\bfemale\b/.test(label)) return 'female' as const;
+        // Check for 'male' with word boundary
+        if (/\bmale\b/.test(label)) return 'male' as const;
         return undefined;
     }, [filterLabel]);
 
@@ -826,10 +907,22 @@ const TextFilterControl = ({
             return;
         }
 
+        // Only load tags if we have a specific category (male or female)
+        // Don't load all tags if category is undefined
+        if (!tagCategory) {
+            console.log(`[TagFilter] No category for filter label: "${filterLabel}", skipping tag load`);
+            setTagOptions([]);
+            return;
+        }
+
         const loadTags = async () => {
             try {
                 await ensureDatabaseReady();
+                console.log(`[TagFilter] Loading tags for category: ${tagCategory}, label: "${filterLabel}"`);
                 const tags = getAllTagsByCategory(tagCategory);
+                console.log(`[TagFilter] Loaded ${tags.length} ${tagCategory} tags`);
+
+                // Just use the tags as-is from the database - no additional filtering
                 const tagNames = tags.map(t => t.canonical);
                 setTagOptions(tagNames);
                 // If user clicked before options loaded, open now
@@ -843,7 +936,7 @@ const TextFilterControl = ({
         };
 
         void loadTags();
-    }, [isTagFilter, tagCategory]);
+    }, [isTagFilter, tagCategory, filterLabel]);
 
     // Sync inputValue with value prop and update ref
     // Skip sync if we just cleared the input intentionally
@@ -881,23 +974,32 @@ const TextFilterControl = ({
         let finalValue: string;
         let tagAdded = false;
 
-        if (append && isTagFilter && baseValue) {
-            // For tag filters, append comma-separated tags
-            const existingTags = baseValue.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
-            const newTagLower = newValue.trim().toLowerCase();
+        if (append && isTagFilter) {
+            if (baseValue) {
+                // For tag filters, append comma-separated tags
+                const existingTags = baseValue.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+                const newTagLower = newValue.trim().toLowerCase();
 
-            // Check if tag already exists
-            if (existingTags.some(tag => tag === newTagLower || tag.includes(newTagLower) || newTagLower.includes(tag))) {
-                // Tag already exists, don't add duplicate
-                setInputValue(baseValue);
-                return;
+                // Check if tag already exists
+                if (existingTags.some(tag => tag === newTagLower || tag.includes(newTagLower) || newTagLower.includes(tag))) {
+                    // Tag already exists, don't add duplicate
+                    setInputValue(baseValue);
+                    return;
+                }
+
+                // Append new tag
+                finalValue = `${baseValue},${newValue.trim()}`;
+                tagAdded = true;
+            } else {
+                // First tag - no existing value
+                finalValue = newValue.trim();
+                tagAdded = true;
             }
-
-            // Append new tag
-            finalValue = `${baseValue},${newValue.trim()}`;
-            tagAdded = true;
         } else {
             finalValue = newValue.trim();
+            if (isTagFilter) {
+                tagAdded = true; // For tag filters, any new value is a tag being added
+            }
         }
 
         // Update ref immediately so subsequent appends use the latest value
@@ -912,8 +1014,9 @@ const TextFilterControl = ({
                 : null,
         );
 
-        // Clear input if requested (typically after selecting from dropdown)
-        if (clearInput && tagAdded) {
+        // Clear input if requested (typically after selecting from dropdown or applying tag)
+        // For tag filters, always clear input after adding a tag
+        if (clearInput || (isTagFilter && tagAdded)) {
             shouldSkipSyncRef.current = true; // Prevent useEffect from syncing back
             setInputValue('');
         } else {
@@ -934,14 +1037,24 @@ const TextFilterControl = ({
                         options={tagOptions}
                         value={null}
                         inputValue={inputValue}
-                        onInputChange={(_, newInputValue) => {
-                            setInputValue(newInputValue);
+                        onInputChange={(_, newInputValue, reason) => {
+                            // Don't update input if the reason is 'reset' (which happens after selection)
+                            // This prevents the autocomplete from setting the value back after we clear it
+                            if (reason !== 'reset') {
+                                setInputValue(newInputValue);
+                            }
                         }}
                         onChange={(_, newValue) => {
                             // When selecting from dropdown, append to existing tags
                             const tagValue = typeof newValue === 'string' ? newValue : newValue || '';
                             if (tagValue) {
+                                // Clear input immediately and prevent autocomplete from setting it back
+                                shouldSkipSyncRef.current = true;
+                                setInputValue('');
                                 handleChange(tagValue, true, true); // true = append mode, true = clear input after
+                            } else {
+                                // If cleared, also clear the input
+                                setInputValue('');
                             }
                         }}
                         open={forceOpen ? true : undefined}
@@ -959,7 +1072,10 @@ const TextFilterControl = ({
                         selectOnFocus
                         clearOnBlur={false}
                         handleHomeEndKeys
-                        getOptionLabel={(option) => (typeof option === 'string' ? option : option)}
+                        getOptionLabel={(option) => {
+                            const tag = typeof option === 'string' ? option : option;
+                            return capitalizeTag(tag);
+                        }}
                         isOptionEqualToValue={() => false}
                         filterOptions={(options, { inputValue: filterInput }) => {
                             if (!filterInput || filterInput.trim() === '') {
@@ -1004,8 +1120,8 @@ const TextFilterControl = ({
                                         // Commit manually typed value when blurring
                                         if (inputValue && inputValue.trim()) {
                                             // For tag filters, append and clear input; for others, replace
-                                            const shouldAppend = isTagFilter && value && value.trim();
-                                            handleChange(inputValue.trim(), shouldAppend, shouldAppend);
+                                            const shouldAppend = !!(isTagFilter && value && value.trim());
+                                            handleChange(inputValue.trim(), shouldAppend, true); // Always clear input for tag filters
                                         }
                                         setForceOpen(false);
                                     }, 200);
@@ -1015,9 +1131,9 @@ const TextFilterControl = ({
                                     if (event.key === 'Enter' && inputValue && inputValue.trim()) {
                                         event.preventDefault();
                                         // For tag filters, append and clear input; for others, replace
-                                        const shouldAppend = isTagFilter && value && value.trim();
-                                        handleChange(inputValue.trim(), shouldAppend, shouldAppend); // append if tag filter, clear if appending
-                                        setIsOpen(false);
+                                        const shouldAppend = !!(isTagFilter && value && value.trim());
+                                        handleChange(inputValue.trim(), shouldAppend, true); // Always clear input for tag filters
+                                        setForceOpen(false);
                                     }
                                 }}
                                 sx={{
@@ -1025,22 +1141,52 @@ const TextFilterControl = ({
                                     '& .MuiInput-root': {
                                         color: '#fff',
                                         fontSize: '0.95rem',
+                                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                                        '&:before': {
+                                            borderBottomColor: alpha(supportColor, 0.25),
+                                            transition: 'border-color 0.3s ease',
+                                        },
+                                        '&:hover:not(.Mui-disabled):before': {
+                                            borderBottomColor: alpha(supportColor, 0.6),
+                                            borderBottomWidth: '2px',
+                                        },
+                                        '&.Mui-focused': {
+                                            '&:after': {
+                                                borderBottomColor: supportColor,
+                                                borderBottomWidth: '2px',
+                                                boxShadow: `0 2px 8px ${alpha(supportColor, 0.4)}`,
+                                            },
+                                            '&:before': {
+                                                borderBottomColor: alpha(supportColor, 0.3),
+                                            },
+                                        },
                                     },
-                                    '& .MuiInput-root:before': {
-                                        borderBottomColor: alpha(supportColor, 0.25),
-                                    },
-                                    '& .MuiInput-root:hover:not(.Mui-disabled):before': {
-                                        borderBottomColor: alpha(supportColor, 0.5),
-                                    },
-                                    '& .MuiInput-root.Mui-focused:after': {
-                                        borderBottomColor: supportColor,
+                                    '& .MuiInput-input': {
+                                        '&::placeholder': {
+                                            color: alpha('#fff', 0.5),
+                                            opacity: 1,
+                                            transition: 'color 0.3s ease',
+                                        },
+                                        '&:focus::placeholder': {
+                                            color: alpha(supportColor, 0.6),
+                                        },
                                     },
                                 }}
                                 InputProps={{
                                     ...params.InputProps,
                                     endAdornment: (
                                         <InputAdornment position="end">
-                                            <SearchIcon fontSize="small" />
+                                            <SearchIcon
+                                                fontSize="small"
+                                                sx={{
+                                                    color: alpha(supportColor, 0.7),
+                                                    transition: 'all 0.3s ease',
+                                                    '&:hover': {
+                                                        color: supportColor,
+                                                        transform: 'scale(1.1)',
+                                                    },
+                                                }}
+                                            />
                                         </InputAdornment>
                                     ),
                                 }}
@@ -1060,32 +1206,82 @@ const TextFilterControl = ({
                                 key={option}
                                 style={{
                                     backgroundColor: 'transparent',
-                                    color: '#fff',
+                                    color: '#fff !important',
+                                    opacity: '1 !important',
+                                    filter: 'none !important',
                                 }}
                             >
-                                <Typography variant="body2">{option}</Typography>
+                                <Stack direction="row" alignItems="center" spacing={1.5}>
+                                    <Box
+                                        sx={{
+                                            width: 6,
+                                            height: 6,
+                                            borderRadius: '50%',
+                                            backgroundColor: alpha(supportColor, 0.6),
+                                            boxShadow: `0 0 8px ${alpha(supportColor, 0.4)}`,
+                                        }}
+                                    />
+                                    <Typography
+                                        variant="body2"
+                                        sx={{
+                                            fontWeight: 500,
+                                            letterSpacing: '0.02em',
+                                            color: '#fff !important',
+                                            opacity: '1 !important',
+                                            filter: 'none !important',
+                                            textShadow: 'none !important',
+                                            WebkitTextStroke: 'none !important',
+                                            WebkitFontSmoothing: 'antialiased',
+                                        }}
+                                    >
+                                        {capitalizeTag(option)}
+                                    </Typography>
+                                </Stack>
                             </li>
                         )}
                         componentsProps={{
                             paper: {
                                 sx: {
-                                    backgroundColor: '#1a1a1a',
-                                    backgroundImage: 'none',
-                                    border: `1px solid ${alpha('#ea4c89', 0.3)}`,
-                                    boxShadow: `0 4px 20px ${alpha('#ea4c89', 0.2)}`,
-                                    marginTop: '4px',
+                                    backgroundColor: '#1a1a1a !important',
+                                    background: '#1a1a1a !important',
+                                    backgroundImage: 'none !important',
+                                    border: `1px solid ${alpha('#ea4c89', 0.4)} !important`,
+                                    borderRadius: '12px',
+                                    boxShadow: `0 2px 8px ${alpha('#000', 0.5)} !important`,
+                                    marginTop: '8px',
+                                    overflow: 'hidden',
+                                    backdropFilter: 'none',
                                     '& .MuiAutocomplete-listbox': {
-                                        padding: 0,
+                                        padding: '8px 0',
+                                        backgroundColor: 'transparent',
                                         '& .MuiAutocomplete-option': {
-                                            color: '#fff',
-                                            padding: '8px 16px',
+                                            color: '#fff !important',
+                                            padding: '12px 20px',
+                                            margin: '2px 8px',
+                                            borderRadius: '8px',
+                                            transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                            backgroundColor: 'transparent',
+                                            opacity: '1 !important',
+                                            filter: 'none !important',
+                                            '& *': {
+                                                color: '#fff !important',
+                                                opacity: '1 !important',
+                                                filter: 'none !important',
+                                                textShadow: 'none !important',
+                                                WebkitTextStroke: 'none !important',
+                                            },
                                             '&:hover, &.Mui-focused': {
-                                                backgroundColor: alpha('#ea4c89', 0.15),
+                                                backgroundColor: `${alpha(supportColor, 0.25)} !important`,
+                                                transform: 'translateX(4px)',
+                                                boxShadow: `0 2px 4px ${alpha('#000', 0.3)}`,
                                             },
                                             '&[aria-selected="true"]': {
-                                                backgroundColor: alpha('#ea4c89', 0.25),
+                                                backgroundColor: `${alpha(supportColor, 0.3)} !important`,
+                                                background: `${alpha(supportColor, 0.3)} !important`,
                                                 '&:hover, &.Mui-focused': {
-                                                    backgroundColor: alpha('#ea4c89', 0.35),
+                                                    backgroundColor: `${alpha(supportColor, 0.45)} !important`,
+                                                    transform: 'translateX(4px)',
+                                                    boxShadow: `0 2px 4px ${alpha('#000', 0.3)}`,
                                                 },
                                             },
                                         },
@@ -1115,15 +1311,62 @@ const TextFilterControl = ({
                         InputProps={{
                             endAdornment: (
                                 <InputAdornment position="end">
-                                    <SearchIcon fontSize="small" />
+                                    <SearchIcon
+                                        fontSize="small"
+                                        sx={{
+                                            color: alpha(supportColor, 0.7),
+                                            transition: 'all 0.3s ease',
+                                            '&:hover': {
+                                                color: supportColor,
+                                                transform: 'scale(1.1)',
+                                            },
+                                        }}
+                                    />
                                 </InputAdornment>
                             ),
                         }}
                         variant="standard"
+                        sx={{
+                            '& .MuiInput-root': {
+                                color: '#fff',
+                                fontSize: '0.95rem',
+                                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                                '&:before': {
+                                    borderBottomColor: alpha(supportColor, 0.25),
+                                    transition: 'border-color 0.3s ease',
+                                },
+                                '&:hover:not(.Mui-disabled):before': {
+                                    borderBottomColor: alpha(supportColor, 0.6),
+                                    borderBottomWidth: '2px',
+                                },
+                                '&.Mui-focused': {
+                                    '&:after': {
+                                        borderBottomColor: supportColor,
+                                        borderBottomWidth: '2px',
+                                        boxShadow: `0 2px 8px ${alpha(supportColor, 0.4)}`,
+                                    },
+                                    '&:before': {
+                                        borderBottomColor: alpha(supportColor, 0.3),
+                                    },
+                                },
+                            },
+                            '& .MuiInput-input': {
+                                '&::placeholder': {
+                                    color: alpha('#fff', 0.5),
+                                    opacity: 1,
+                                    transition: 'color 0.3s ease',
+                                },
+                                '&:focus::placeholder': {
+                                    color: alpha(supportColor, 0.6),
+                                },
+                            },
+                        }}
                         autoComplete="off"
                     />
                 )}
-                <SupportIndicator supportcolor={supportColor}>{supportLabel}</SupportIndicator>
+                {supportLabel && (
+                    <SupportIndicator supportcolor={supportColor}>{supportLabel}</SupportIndicator>
+                )}
             </TextFieldWrapper>
         </Stack>
     );
@@ -1140,6 +1383,8 @@ export type ModeOneFilterPanelProps = {
     onQueryChange: (value: string) => void;
     strictOnly: boolean;
     onStrictOnlyChange: (value: boolean) => void;
+    hideColorless: boolean;
+    onHideColorlessChange: (value: boolean) => void;
     onReset: () => void;
     liveUpdatesEnabled: boolean;
     onLiveUpdatesEnabledChange: (value: boolean) => void;
@@ -1158,6 +1403,8 @@ export const ModeOneFilterPanel = ({
     onQueryChange,
     strictOnly,
     onStrictOnlyChange,
+    hideColorless,
+    onHideColorlessChange,
     onReset,
     liveUpdatesEnabled,
     onLiveUpdatesEnabledChange,
@@ -1302,6 +1549,7 @@ export const ModeOneFilterPanel = ({
 
     const activeFilterChips = useMemo(
         () => {
+            console.log('[activeFilterChips] Recalculating chips, selection:', selection);
             const chips: Array<{ key: string; label: string; filterKey: string; onDelete: () => void }> = [];
 
             Object.entries(selection).forEach(([filterKey, selectionValue]) => {
@@ -1370,7 +1618,7 @@ export const ModeOneFilterPanel = ({
                                 tags.forEach((tag, index) => {
                                     chips.push({
                                         key: `${filterKey}-tag-${index}-${tag}`,
-                                        label: tag,
+                                        label: capitalizeTag(tag),
                                         filterKey,
                                         onDelete: () => {
                                             // Remove this specific tag from the comma-separated list
@@ -1392,7 +1640,7 @@ export const ModeOneFilterPanel = ({
                                 const displayValue = canonicalizeTagValue(selectionValue.value) || selectionValue.value;
                                 chips.push({
                                     key: `${filterKey}-tag-${displayValue}`,
-                                    label: displayValue,
+                                    label: capitalizeTag(displayValue),
                                     filterKey,
                                     onDelete: () => onSelectionChange(filterKey, null),
                                 });
@@ -1417,6 +1665,8 @@ export const ModeOneFilterPanel = ({
         },
         [filtersByKey, selection, t, onSelectionChange],
     );
+
+    console.log('[ModeOneFilterPanel] Render - activeFilterChips count:', activeFilterChips.length, 'selection keys:', Object.keys(selection));
 
     // Extract active tags from selection
     const activeTags = useMemo(() => {
@@ -1608,7 +1858,13 @@ export const ModeOneFilterPanel = ({
         let advancedActive = 0;
 
         aggregatedFilters.forEach((filter) => {
-            const isActive = !!selection[filter.key];
+            const selectionValue = selection[filter.key];
+            // Only count as active if there's a meaningful value
+            const isActive = selectionValue && (
+                (selectionValue.type === 'text' && selectionValue.value && selectionValue.value.trim() !== '') ||
+                (selectionValue.type === 'select' && selectionValue.value) ||
+                (selectionValue.type === 'checkbox' && selectionValue.value === true)
+            );
 
             // Common filters: 
             // 1. Filters in COMMON_FILTER_KEYS (sort, rating, tag_search_mode)
@@ -1693,13 +1949,58 @@ export const ModeOneFilterPanel = ({
             }
 
             return (
-                <Stack key={filter.key} spacing={0.5}>
-                    <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#fff' }}>
+                <Box
+                    key={filter.key}
+                    sx={{
+                        backgroundColor: alpha('#1a1a2e', 0.8),
+                        backdropFilter: 'blur(20px)',
+                        border: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                        borderRadius: '20px',
+                        p: 3.5,
+                        position: 'relative',
+                        overflow: 'hidden',
+                        transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+                        '&::before': {
+                            content: '""',
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: '2px',
+                            background: `linear-gradient(90deg, transparent, ${alpha('#ea4c89', 0.6)}, transparent)`,
+                            opacity: 0,
+                            transition: 'opacity 0.4s ease',
+                        },
+                        '&:hover': {
+                            borderColor: alpha('#ea4c89', 0.4),
+                            boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.2)}, 0 0 0 1px ${alpha('#ea4c89', 0.1)}`,
+                            transform: 'translateY(-2px)',
+                            backgroundColor: alpha('#1a1a2e', 0.9),
+                            '&::before': {
+                                opacity: 1,
+                            },
+                        },
+                    }}
+                >
+                    <Typography
+                        variant="subtitle1"
+                        sx={{
+                            fontWeight: 700,
+                            color: '#fff',
+                            fontSize: '1.15rem',
+                            mb: 2.5,
+                            letterSpacing: '0.02em',
+                            textTransform: 'none',
+                            background: 'linear-gradient(135deg, #fff 0%, #f082ac 100%)',
+                            backgroundClip: 'text',
+                            WebkitBackgroundClip: 'text',
+                            WebkitTextFillColor: 'transparent',
+                        }}
+                    >
                         {filter.label}
                     </Typography>
                     {control}
-                    <Divider sx={{ opacity: 0.2, borderColor: alpha('#ea4c89', 0.1) }} />
-                </Stack>
+                </Box>
             );
         },
         [onSelectionChange, placeholderSelect, placeholderText, resolveSelectHint, selection],
@@ -1713,30 +2014,13 @@ export const ModeOneFilterPanel = ({
             maxWidth="md"
             PaperProps={{
                 sx: {
-                    backgroundColor: '#0f0f1a',
-                    background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 50%, #0f0f1a 100%)',
-                    border: `1px solid ${alpha('#ea4c89', 0.4)}`,
-                    borderRadius: '16px',
-                    boxShadow: `0 25px 50px -12px rgba(0,0,0,0.8), 0 0 0 1px ${alpha('#ea4c89', 0.1)}`,
+                    backgroundColor: alpha('#0f0f1a', 0.95),
+                    backdropFilter: 'blur(40px)',
+                    background: 'linear-gradient(180deg, #141422 0%, #0f0f1a 100%)',
+                    border: `1px solid ${alpha('#ea4c89', 0.3)}`,
+                    borderRadius: '28px',
+                    boxShadow: `0 25px 80px ${alpha('#000', 0.7)}, 0 0 0 1px ${alpha('#ea4c89', 0.2)}, inset 0 1px 0 ${alpha('#fff', 0.05)}`,
                     overflow: 'hidden',
-                },
-            }}
-            slotProps={{
-                backdrop: {
-                    sx: {
-                        backgroundColor: 'rgba(0, 0, 0, 0.85)',
-                        backdropFilter: 'blur(8px)',
-                    },
-                },
-            }}
-        >
-            <DialogTitle
-                sx={{
-                    pb: 3,
-                    pt: 3,
-                    px: 3,
-                    background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
-                    borderBottom: `1px solid ${alpha('#ea4c89', 0.2)}`,
                     position: 'relative',
                     '&::before': {
                         content: '""',
@@ -1744,8 +2028,51 @@ export const ModeOneFilterPanel = ({
                         top: 0,
                         left: 0,
                         right: 0,
-                        height: '2px',
-                        background: 'linear-gradient(90deg, transparent, #ea4c89, #f082ac, #ea4c89, transparent)',
+                        height: '1px',
+                        background: `linear-gradient(90deg, transparent, ${alpha('#ea4c89', 0.5)}, transparent)`,
+                    },
+                },
+            }}
+            slotProps={{
+                backdrop: {
+                    sx: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.85)',
+                        backdropFilter: 'none',
+                    },
+                },
+            }}
+        >
+            <DialogTitle
+                sx={{
+                    pb: 4,
+                    pt: 4.5,
+                    px: 4.5,
+                    background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+                    borderBottom: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                    position: 'relative',
+                    overflow: 'hidden',
+                    '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: '3px',
+                        background: 'linear-gradient(90deg, transparent, #ea4c89, #f082ac, #ff4590, #f082ac, #ea4c89, transparent)',
+                        animation: 'shimmer 3s ease-in-out infinite',
+                        '@keyframes shimmer': {
+                            '0%, 100%': { opacity: 0.6 },
+                            '50%': { opacity: 1 },
+                        },
+                    },
+                    '&::after': {
+                        content: '""',
+                        position: 'absolute',
+                        bottom: 0,
+                        left: 0,
+                        right: 0,
+                        height: '1px',
+                        background: `linear-gradient(90deg, transparent, ${alpha('#ea4c89', 0.4)}, transparent)`,
                     },
                 }}
             >
@@ -1755,15 +2082,37 @@ export const ModeOneFilterPanel = ({
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            width: 48,
-                            height: 48,
-                            borderRadius: '12px',
-                            background: 'linear-gradient(135deg, #ea4c89 0%, #f082ac 100%)',
-                            boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}`,
+                            width: 52,
+                            height: 52,
+                            borderRadius: '16px',
+                            background: 'linear-gradient(135deg, #ea4c89 0%, #f082ac 50%, #ff4590 100%)',
+                            boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}, 0 0 0 1px ${alpha('#ea4c89', 0.2)}`,
+                            position: 'relative',
+                            overflow: 'hidden',
                             animation: 'pulse-glow 2s ease-in-out infinite',
                             '@keyframes pulse-glow': {
-                                '0%, 100%': { boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}` },
-                                '50%': { boxShadow: `0 8px 32px ${alpha('#ea4c89', 0.6)}` },
+                                '0%, 100%': {
+                                    boxShadow: `0 8px 24px ${alpha('#ea4c89', 0.4)}, 0 0 0 1px ${alpha('#ea4c89', 0.2)}`,
+                                    transform: 'scale(1)',
+                                },
+                                '50%': {
+                                    boxShadow: `0 12px 40px ${alpha('#ea4c89', 0.6)}, 0 0 0 1px ${alpha('#ea4c89', 0.3)}`,
+                                    transform: 'scale(1.05)',
+                                },
+                            },
+                            '&::before': {
+                                content: '""',
+                                position: 'absolute',
+                                top: '-50%',
+                                left: '-50%',
+                                width: '200%',
+                                height: '200%',
+                                background: 'linear-gradient(45deg, transparent, rgba(255,255,255,0.1), transparent)',
+                                animation: 'rotate-shine 3s linear infinite',
+                                '@keyframes rotate-shine': {
+                                    '0%': { transform: 'rotate(0deg)' },
+                                    '100%': { transform: 'rotate(360deg)' },
+                                },
                             },
                         }}
                     >
@@ -1802,15 +2151,84 @@ export const ModeOneFilterPanel = ({
                 sx={{
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: 2.5,
-                    backgroundColor: '#12121f',
-                    background: 'linear-gradient(180deg, #16213e 0%, #12121f 100%)',
+                    gap: 3.5,
+                    backgroundColor: '#0f0f1a',
+                    background: 'linear-gradient(180deg, #141422 0%, #0f0f1a 100%)',
                     borderTop: 'none',
                     borderBottom: 'none',
-                    py: 3,
-                    px: 3,
+                    py: 5,
+                    px: 4.5,
+                    position: 'relative',
+                    width: '100%',
+                    maxWidth: '100%',
+                    boxSizing: 'border-box',
+                    '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: '1px',
+                        background: `linear-gradient(90deg, transparent, ${alpha('#ea4c89', 0.3)}, transparent)`,
+                    },
+                    '&::-webkit-scrollbar': {
+                        width: '10px',
+                    },
+                    '&::-webkit-scrollbar-track': {
+                        background: alpha('#000', 0.3),
+                        borderRadius: '5px',
+                    },
+                    '&::-webkit-scrollbar-thumb': {
+                        background: `linear-gradient(180deg, ${alpha('#ea4c89', 0.4)}, ${alpha('#f082ac', 0.4)})`,
+                        borderRadius: '5px',
+                        border: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                        '&:hover': {
+                            background: `linear-gradient(180deg, ${alpha('#ea4c89', 0.6)}, ${alpha('#f082ac', 0.6)})`,
+                        },
+                    },
                 }}
             >
+                {/* Hide Colorless Toggle */}
+                <Box
+                    sx={{
+                        backgroundColor: '#1a1a2e',
+                        border: `1px solid ${alpha('#ea4c89', 0.2)}`,
+                        borderRadius: '16px',
+                        p: 3,
+                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                        '&:hover': {
+                            borderColor: alpha('#ea4c89', 0.35),
+                            boxShadow: `0 4px 20px ${alpha('#ea4c89', 0.15)}`,
+                        },
+                    }}
+                >
+                    <Tooltip title="Hide all colorless/grayscale hentais" arrow placement="top">
+                        <FormControlLabel
+                            control={
+                                <Switch
+                                    checked={hideColorless}
+                                    onChange={(_, checked) => onHideColorlessChange(checked)}
+                                    sx={{
+                                        '& .MuiSwitch-switchBase.Mui-checked': {
+                                            color: '#ea4c89',
+                                        },
+                                        '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                                            backgroundColor: '#ea4c89',
+                                        },
+                                    }}
+                                />
+                            }
+                            label={
+                                <Stack direction="row" spacing={0.5} alignItems="center">
+                                    <Typography sx={{ color: '#fff', fontSize: '0.95rem', fontWeight: 500 }}>
+                                        {t('modeOne.filters.hideColorless')}
+                                    </Typography>
+                                    <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#ea4c89', 0.6) }} />
+                                </Stack>
+                            }
+                        />
+                    </Tooltip>
+                </Box>
                 {/* Search query input - Commented out */}
                 {/* <TextField
                     label={t('modeOne.filters.queryLabel')}
@@ -1910,6 +2328,32 @@ export const ModeOneFilterPanel = ({
                                     }
                                 />
                             </Tooltip>
+                            <Tooltip title="Hide all colorless/grayscale hentais" arrow placement="top">
+                                <FormControlLabel
+                                    control={
+                                        <Switch
+                                            checked={hideColorless}
+                                            onChange={(_, checked) => onHideColorlessChange(checked)}
+                                            sx={{
+                                                '& .MuiSwitch-switchBase.Mui-checked': {
+                                                    color: '#ea4c89',
+                                                },
+                                                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                                                    backgroundColor: '#ea4c89',
+                                                },
+                                            }}
+                                        />
+                                    }
+                                    label={
+                                        <Stack direction="row" spacing={0.5} alignItems="center">
+                                            <Typography sx={{ color: '#fff', fontSize: '0.95rem', fontWeight: 500 }}>
+                                                {t('modeOne.filters.hideColorless')}
+                                            </Typography>
+                                            <HelpOutlineIcon sx={{ fontSize: 14, color: alpha('#ea4c89', 0.6) }} />
+                                        </Stack>
+                                    }
+                                />
+                            </Tooltip>
                         </Stack>
                         {!liveUpdatesEnabled && hasPendingChanges && (
                             <Stack
@@ -1980,14 +2424,16 @@ export const ModeOneFilterPanel = ({
                         >
                             <TextFieldWrapper
                                 supportColor={tagSupportColor}
-                                isPulsing={isTagBurstVisible && tagSupportCount > 0}
+                                isPulsing={isTagBurstVisible && tagSupportCount > 0 && !!tagSupportLabel}
                             >
-                                <SupportBurst
-                                    supportcolor={tagSupportColor}
-                                    visible={isTagBurstVisible && tagSupportCount > 0}
-                                >
-                                    {tagSupportLabel}
-                                </SupportBurst>
+                                {tagSupportLabel && (
+                                    <SupportBurst
+                                        supportcolor={tagSupportColor}
+                                        visible={isTagBurstVisible && tagSupportCount > 0}
+                                    >
+                                        {tagSupportLabel}
+                                    </SupportBurst>
+                                )}
                                 <Autocomplete
                                     options={displayedTagSuggestions}
                                     value={tagSearchSelection}
@@ -2006,7 +2452,10 @@ export const ModeOneFilterPanel = ({
                                         setTagSearchValue(newInputValue);
                                     }}
                                     filterOptions={(options) => options}
-                                    getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
+                                    getOptionLabel={(option) => {
+                                        const label = typeof option === 'string' ? option : option.label;
+                                        return capitalizeTag(label);
+                                    }}
                                     disablePortal={false}
                                     autoHighlight
                                     openOnFocus={tagSearchValue.length > 0}
@@ -2028,7 +2477,7 @@ export const ModeOneFilterPanel = ({
                                     renderOption={(props, option) => (
                                         <li {...props} key={option.canonical}>
                                             <Stack spacing={0.5} sx={{ width: '100%' }}>
-                                                <Typography variant="body2">{option.label}</Typography>
+                                                <Typography variant="body2">{capitalizeTag(option.label)}</Typography>
                                                 <Typography variant="caption" color="text.secondary">
                                                     {option.support.length
                                                         ? 'Available on: ' +
@@ -2083,7 +2532,9 @@ export const ModeOneFilterPanel = ({
                                         },
                                     }}
                                 />
-                                <SupportIndicator supportcolor={tagSupportColor}>{tagSupportLabel}</SupportIndicator>
+                                {tagSupportLabel && (
+                                    <SupportIndicator supportcolor={tagSupportColor}>{tagSupportLabel}</SupportIndicator>
+                                )}
                             </TextFieldWrapper>
                             {allTagSuggestions.length > 5 && (
                                 <Button
@@ -2140,9 +2591,9 @@ export const ModeOneFilterPanel = ({
                             background: 'linear-gradient(135deg, #1a2f2e 0%, #1a2a2e 100%)',
                             border: `1px solid ${alpha('#00d9a5', 0.3)}`,
                             borderRadius: '12px',
-                            p: 2.5,
+                            p: 3.5,
                             position: 'relative',
-                            overflow: 'hidden',
+                            overflow: 'visible',
                             '&::before': {
                                 content: '""',
                                 position: 'absolute',
@@ -2154,8 +2605,8 @@ export const ModeOneFilterPanel = ({
                             },
                         }}
                     >
-                        <Stack spacing={1.5}>
-                            <Stack direction="row" alignItems="center" spacing={1} justifyContent="space-between">
+                        <Stack spacing={2.5}>
+                            <Stack direction="row" alignItems="center" spacing={1.5} justifyContent="space-between">
                                 <Stack direction="row" alignItems="center" spacing={1.5}>
                                     <Box
                                         sx={{
@@ -2218,44 +2669,89 @@ export const ModeOneFilterPanel = ({
                                     </Button>
                                 )}
                             </Stack>
-                            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                                {activeFilterChips.map((chip) => (
-                                    <Chip
-                                        key={chip.key}
-                                        label={chip.label}
-                                        onDelete={chip.onDelete}
-                                        size="small"
-                                        sx={{
-                                            backgroundColor: '#1f3a3a',
-                                            color: '#fff',
-                                            border: `1px solid ${alpha('#00d9a5', 0.4)}`,
-                                            fontWeight: 600,
-                                            fontSize: '0.85rem',
-                                            borderRadius: '8px',
-                                            transition: 'all 0.3s ease',
-                                            '& .MuiChip-label': {
-                                                paddingLeft: '12px',
-                                                paddingRight: '8px',
-                                            },
-                                            '& .MuiChip-deleteIcon': {
-                                                color: alpha('#00d9a5', 0.7),
-                                                fontSize: '18px',
-                                                transition: 'all 0.2s ease',
-                                                '&:hover': {
-                                                    color: '#00d9a5',
-                                                    transform: 'scale(1.1)',
+                            {activeFilterChips.length > 0 && (
+                                <Box
+                                    sx={{
+                                        display: 'flex',
+                                        flexWrap: 'wrap',
+                                        gap: '10px',
+                                        width: '100%',
+                                        minHeight: '50px',
+                                        backgroundColor: alpha('#1a1a2e', 0.5),
+                                        border: `1px solid ${alpha('#ea4c89', 0.15)}`,
+                                        borderRadius: '12px',
+                                        p: 2,
+                                        transition: 'all 0.3s ease',
+                                    }}
+                                >
+                                    {activeFilterChips.map((chip) => (
+                                        <Chip
+                                            key={chip.key}
+                                            label={chip.label}
+                                            onDelete={chip.onDelete}
+                                            size="medium"
+                                            sx={{
+                                                backgroundColor: `${alpha('#ea4c89', 0.12)} !important`,
+                                                backdropFilter: 'blur(10px)',
+                                                color: '#fff !important',
+                                                border: `1px solid ${alpha('#ea4c89', 0.25)} !important`,
+                                                fontWeight: 600,
+                                                fontSize: '0.875rem',
+                                                borderRadius: '12px',
+                                                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                                                height: 'auto',
+                                                minHeight: '38px',
+                                                margin: '0 !important',
+                                                flexShrink: 0,
+                                                display: 'inline-flex',
+                                                visibility: 'visible',
+                                                opacity: 1,
+                                                position: 'relative',
+                                                overflow: 'hidden',
+                                                '&::before': {
+                                                    content: '""',
+                                                    position: 'absolute',
+                                                    top: 0,
+                                                    left: '-100%',
+                                                    width: '100%',
+                                                    height: '100%',
+                                                    background: `linear-gradient(90deg, transparent, ${alpha('#fff', 0.1)}, transparent)`,
+                                                    transition: 'left 0.5s ease',
                                                 },
-                                            },
-                                            '&:hover': {
-                                                backgroundColor: '#255a5a',
-                                                borderColor: alpha('#00d9a5', 0.6),
-                                                transform: 'translateY(-1px)',
-                                                boxShadow: `0 4px 12px ${alpha('#00d9a5', 0.2)}`,
-                                            },
-                                        }}
-                                    />
-                                ))}
-                            </Stack>
+                                                '&:hover': {
+                                                    backgroundColor: `${alpha('#ea4c89', 0.25)} !important`,
+                                                    borderColor: `${alpha('#ea4c89', 0.5)} !important`,
+                                                    transform: 'translateY(-2px) scale(1.02)',
+                                                    boxShadow: `0 6px 20px ${alpha('#ea4c89', 0.3)}`,
+                                                    '&::before': {
+                                                        left: '100%',
+                                                    },
+                                                },
+                                                '& .MuiChip-label': {
+                                                    paddingLeft: '16px',
+                                                    paddingRight: '12px',
+                                                    paddingTop: '8px',
+                                                    paddingBottom: '8px',
+                                                    whiteSpace: 'nowrap',
+                                                    overflow: 'visible',
+                                                    textOverflow: 'ellipsis',
+                                                    lineHeight: '1.4',
+                                                    display: 'inline-block',
+                                                },
+                                                '& .MuiChip-deleteIcon': {
+                                                    color: alpha('#ea4c89', 0.7),
+                                                    fontSize: '18px',
+                                                    transition: 'all 0.2s ease',
+                                                    '&:hover': {
+                                                        color: '#ea4c89',
+                                                        transform: 'scale(1.1)',
+                                                    },
+                                                },
+                                            }}
+                                        />
+                                    ))}
+                                </Box>
+                            )}
                         </Stack>
                     </Box>
                 )}
@@ -2618,60 +3114,207 @@ export const ModeOneFilterPanel = ({
 
                                 // Clean tag (remove gender prefix and star)
                                 const cleanTag = tagWithoutStar.replace(/^(?:male|female):\s*/i, '').trim();
-                                const isAlreadyAdded = existingTags.some((existing: string) =>
-                                    existing === cleanTag.toLowerCase() ||
-                                    existing.includes(cleanTag.toLowerCase()) ||
-                                    cleanTag.toLowerCase().includes(existing)
-                                );
+                                // Canonicalize the tag to ensure proper format
+                                const canonicalTag = canonicalizeTagValue(cleanTag) || cleanTag;
+                                const isAlreadyAdded = existingTags.some((existing: string) => {
+                                    const canonicalExisting = canonicalizeTagValue(existing) || existing;
+                                    return canonicalExisting.toLowerCase() === canonicalTag.toLowerCase() ||
+                                        canonicalExisting.toLowerCase().includes(canonicalTag.toLowerCase()) ||
+                                        canonicalTag.toLowerCase().includes(canonicalExisting.toLowerCase());
+                                });
+
+                                const handleTagClick = (e: React.MouseEvent) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+
+                                    console.log('[TagClick] ===== START =====');
+                                    console.log('[TagClick] Tag:', tag);
+                                    console.log('[TagClick] IsAlreadyAdded:', isAlreadyAdded);
+                                    console.log('[TagClick] TargetFilter:', targetFilter?.key, targetFilter?.label);
+                                    console.log('[TagClick] CurrentValue:', currentValue);
+                                    console.log('[TagClick] CanonicalTag:', canonicalTag);
+                                    console.log('[TagClick] Selection:', selection);
+                                    console.log('[TagClick] SelValue:', selValue);
+
+                                    if (isAlreadyAdded) {
+                                        console.log('[TagClick] Tag already added, skipping');
+                                        return;
+                                    }
+
+                                    if (!targetFilter) {
+                                        console.error('[TagClick] No target filter found for tag:', tag);
+                                        return;
+                                    }
+
+                                    // Use canonicalized tag for consistency
+                                    const newValue = currentValue && currentValue.trim()
+                                        ? `${currentValue},${canonicalTag}`
+                                        : canonicalTag;
+
+                                    const newSelectionValue: FilterSelectionValue = {
+                                        type: 'text',
+                                        value: newValue,
+                                    };
+
+                                    console.log('[TagClick] NewValue:', newValue);
+                                    console.log('[TagClick] NewSelectionValue:', newSelectionValue);
+                                    console.log('[TagClick] Calling onSelectionChange with:', {
+                                        filterKey: targetFilter.key,
+                                        value: newSelectionValue
+                                    });
+
+                                    console.log('[TagClick] About to call onSelectionChange');
+                                    console.log('[TagClick] onSelectionChange function:', onSelectionChange);
+                                    console.log('[TagClick] onSelectionChange type:', typeof onSelectionChange);
+
+                                    try {
+                                        const result = onSelectionChange(targetFilter.key, newSelectionValue);
+                                        console.log('[TagClick] onSelectionChange returned:', result);
+                                        console.log('[TagClick] onSelectionChange called successfully');
+
+                                        // Verify the selection was updated by checking it after a short delay
+                                        setTimeout(() => {
+                                            console.log('[TagClick] Selection after update:', selection);
+                                            console.log('[TagClick] Expected filter key:', targetFilter.key);
+                                            console.log('[TagClick] Expected value:', newValue);
+                                            const updatedValue = selection[targetFilter.key];
+                                            console.log('[TagClick] Updated value in selection:', updatedValue);
+                                            if (updatedValue?.type === 'text' && updatedValue.value === newValue) {
+                                                console.log('[TagClick] ✓ Selection update confirmed!');
+                                            } else {
+                                                console.warn('[TagClick] ⚠ Selection update may not have propagated yet');
+                                            }
+                                        }, 100);
+
+                                        console.log('[TagClick] ===== END =====');
+                                    } catch (error) {
+                                        console.error('[TagClick] Error calling onSelectionChange:', error);
+                                        console.error('[TagClick] Error stack:', error instanceof Error ? error.stack : 'No stack');
+                                        console.log('[TagClick] ===== END (ERROR) =====');
+                                    }
+
+                                    // Close the recommendations dialog after applying
+                                    setTimeout(() => {
+                                        setRecommendationsOpen(false);
+                                    }, 300);
+                                };
 
                                 return (
-                                    <Chip
+                                    <Box
                                         key={tag}
-                                        label={tag}
-                                        onClick={() => {
-                                            if (isAlreadyAdded) {
-                                                return; // Already added
-                                            }
-                                            const newValue = currentValue && currentValue.trim()
-                                                ? `${currentValue},${cleanTag}`
-                                                : cleanTag;
-                                            onSelectionChange(targetFilter!.key, {
-                                                type: 'text',
-                                                value: newValue,
-                                            });
-                                        }}
                                         sx={{
-                                            // Cross-matched tags get gold styling, others get pink
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
                                             backgroundColor: isAlreadyAdded
-                                                ? alpha('#4caf50', 0.15)
+                                                ? alpha('#4caf50', 0.08)
                                                 : isCrossMatch
-                                                    ? alpha('#ffd700', 0.2)
-                                                    : alpha('#ea4c89', 0.15),
-                                            color: '#fff',
+                                                    ? alpha('#ffd700', 0.1)
+                                                    : alpha('#ea4c89', 0.1),
                                             border: `1px solid ${isAlreadyAdded
-                                                ? alpha('#4caf50', 0.3)
+                                                ? alpha('#4caf50', 0.2)
                                                 : isCrossMatch
-                                                    ? alpha('#ffd700', 0.5)
-                                                    : alpha('#ea4c89', 0.3)}`,
-                                            cursor: isAlreadyAdded ? 'default' : 'pointer',
-                                            fontWeight: isCrossMatch ? 600 : 400,
-                                            boxShadow: isCrossMatch && !isAlreadyAdded
-                                                ? `0 0 8px ${alpha('#ffd700', 0.3)}`
-                                                : 'none',
+                                                    ? alpha('#ffd700', 0.3)
+                                                    : alpha('#ea4c89', 0.2)}`,
+                                            borderRadius: '12px',
+                                            padding: '4px',
+                                            paddingRight: '8px',
+                                            gap: '6px',
+                                            transition: 'all 0.2s ease',
                                             '&:hover': {
-                                                backgroundColor: isAlreadyAdded
-                                                    ? alpha('#4caf50', 0.15)
-                                                    : isCrossMatch
-                                                        ? alpha('#ffd700', 0.3)
-                                                        : alpha('#ea4c89', 0.25),
                                                 borderColor: isAlreadyAdded
-                                                    ? alpha('#4caf50', 0.3)
+                                                    ? alpha('#4caf50', 0.4)
                                                     : isCrossMatch
-                                                        ? '#ffd700'
-                                                        : '#ea4c89',
+                                                        ? alpha('#ffd700', 0.5)
+                                                        : alpha('#ea4c89', 0.4),
+                                                backgroundColor: isAlreadyAdded
+                                                    ? alpha('#4caf50', 0.12)
+                                                    : isCrossMatch
+                                                        ? alpha('#ffd700', 0.15)
+                                                        : alpha('#ea4c89', 0.15),
                                             },
                                         }}
-                                    />
+                                    >
+                                        <Chip
+                                            label={tag}
+                                            sx={{
+                                                // Cross-matched tags get gold styling, others get pink
+                                                backgroundColor: 'transparent',
+                                                color: '#fff',
+                                                border: 'none',
+                                                fontWeight: isCrossMatch ? 600 : 400,
+                                                borderRadius: '8px',
+                                                fontSize: '0.875rem',
+                                                height: '28px',
+                                                paddingLeft: '8px',
+                                                paddingRight: '8px',
+                                                boxShadow: 'none',
+                                            }}
+                                        />
+                                        <Button
+                                            onClick={(e) => {
+                                                console.log('[Button] onClick triggered for tag:', tag);
+                                                console.log('[Button] Event:', e);
+                                                console.log('[Button] IsAlreadyAdded:', isAlreadyAdded);
+                                                console.log('[Button] TargetFilter:', targetFilter?.key);
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                handleTagClick(e);
+                                            }}
+                                            onMouseDown={(e) => {
+                                                // Prevent default to avoid focus issues
+                                                e.preventDefault();
+                                            }}
+                                            disabled={isAlreadyAdded}
+                                            size="small"
+                                            variant="contained"
+                                            sx={{
+                                                minWidth: 'auto',
+                                                width: '28px',
+                                                height: '28px',
+                                                padding: 0,
+                                                borderRadius: '8px',
+                                                backgroundColor: isAlreadyAdded
+                                                    ? alpha('#4caf50', 0.3)
+                                                    : isCrossMatch
+                                                        ? alpha('#ffd700', 0.5)
+                                                        : alpha('#ea4c89', 0.5),
+                                                color: '#fff',
+                                                border: `1px solid ${isAlreadyAdded
+                                                    ? alpha('#4caf50', 0.5)
+                                                    : isCrossMatch
+                                                        ? alpha('#ffd700', 0.7)
+                                                        : alpha('#ea4c89', 0.7)}`,
+                                                boxShadow: 'none',
+                                                transition: 'all 0.2s ease',
+                                                '&:hover': {
+                                                    backgroundColor: isAlreadyAdded
+                                                        ? alpha('#4caf50', 0.3)
+                                                        : isCrossMatch
+                                                            ? alpha('#ffd700', 0.7)
+                                                            : alpha('#ea4c89', 0.7),
+                                                    borderColor: isAlreadyAdded
+                                                        ? alpha('#4caf50', 0.5)
+                                                        : isCrossMatch
+                                                            ? '#ffd700'
+                                                            : '#ea4c89',
+                                                    transform: 'scale(1.1)',
+                                                    boxShadow: isCrossMatch
+                                                        ? `0 2px 8px ${alpha('#ffd700', 0.5)}`
+                                                        : `0 2px 8px ${alpha('#ea4c89', 0.5)}`,
+                                                },
+                                                '&:disabled': {
+                                                    backgroundColor: alpha('#4caf50', 0.2),
+                                                    borderColor: alpha('#4caf50', 0.3),
+                                                    color: alpha('#fff', 0.5),
+                                                },
+                                                '& .MuiButton-startIcon': {
+                                                    margin: 0,
+                                                },
+                                            }}
+                                        >
+                                            <AddIcon sx={{ fontSize: '16px' }} />
+                                        </Button>
+                                    </Box>
                                 );
                             })}
                         </Stack>

@@ -256,13 +256,14 @@ const initDatabase = async (): Promise<void> => {
             db.run(`
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                canonical TEXT NOT NULL UNIQUE,
+                canonical TEXT NOT NULL,
                 category TEXT NOT NULL CHECK(category IN ('male', 'female')),
                 aliases TEXT, -- JSON array
                 recommended TEXT, -- JSON array
                 related TEXT, -- JSON array
                 normalized_canonical TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(canonical, category) -- Allow same tag in both male and female categories
             );
 
             CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical);
@@ -873,7 +874,7 @@ const insertTag = (db: SqlJsDatabase, canonical: string, data: any, category: 'm
 };
 
 // Database version - increment this to force reload after tokenization fix
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4; // Incremented to allow duplicate tags across male/female categories
 
 // Save database to IndexedDB for persistence
 const saveDatabaseToIndexedDB = async (): Promise<void> => {
@@ -991,13 +992,14 @@ const attemptDatabaseRecovery = async (): Promise<void> => {
         db.run(`
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                canonical TEXT NOT NULL UNIQUE,
+                canonical TEXT NOT NULL,
                 category TEXT NOT NULL CHECK(category IN ('male', 'female')),
                 aliases TEXT,
                 recommended TEXT,
                 related TEXT,
                 normalized_canonical TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(canonical, category) -- Allow same tag in both male and female categories
             );
 
             CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical);

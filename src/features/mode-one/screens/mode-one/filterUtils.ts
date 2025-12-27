@@ -37,36 +37,217 @@ export const matchesSource = (source: SourceListFieldsFragment, patterns: string
     });
 };
 
-// Normalize title for comparison (lowercase, trim, remove extra spaces)
+// Common/stop words to ignore in similarity matching
+const STOP_WORDS = new Set([
+    'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+    'her', 'his', 'my', 'your', 'their', 'its', 'is', 'are', 'was', 'were', 'be', 'been',
+    'who', 'what', 'which', 'that', 'this', 'these', 'those',
+    'i', 'me', 'you', 'he', 'she', 'it', 'we', 'they',
+    'vol', 'ch', 'chapter', 'part', 'episode', 'ep',
+]);
+
+// Normalize title for comparison - aggressive normalization to catch more duplicates
 const normalizeTitle = (title: string | null | undefined): string => {
     if (!title) return '';
-    return title.toLowerCase().trim().replace(/\s+/g, ' ');
+    return title
+        .toLowerCase()
+        .trim()
+        // Remove common prefixes/suffixes
+        .replace(/^\[.*?\]\s*/g, '') // Remove [tag] prefixes
+        .replace(/\s*\[.*?\]$/g, '') // Remove [tag] suffixes
+        .replace(/\s*\(.*?\)$/g, '') // Remove (info) suffixes
+        .replace(/\s*～.*$/g, '') // Remove Japanese continuation markers
+        .replace(/\s*~.*$/g, '') // Remove ~ continuations
+        .replace(/\s*\d+$/, '') // Remove trailing numbers (chapter/volume)
+        .replace(/[^\w\s]/g, '') // Remove special characters
+        .replace(/\s+/g, ' ') // Normalize spaces
+        .trim();
 };
 
-export const getUniqueMangas = (mangas: MangaCardProps['manga'][]): MangaCardProps['manga'][] => {
+// Create a simplified key for fuzzy matching
+const createFuzzyKey = (title: string | null | undefined): string => {
+    if (!title) return '';
+    // Remove all non-alphanumeric and create a condensed key
+    return title
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '')
+        .substring(0, 30); // First 30 chars for matching
+};
+
+// Create character n-grams for fuzzy matching (catches typos and variations)
+const createNGrams = (text: string, n: number = 3): Set<string> => {
+    const normalized = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const ngrams = new Set<string>();
+    for (let i = 0; i <= normalized.length - n; i++) {
+        ngrams.add(normalized.substring(i, i + n));
+    }
+    return ngrams;
+};
+
+// Calculate n-gram similarity (good for catching typos and OCR errors)
+const calculateNGramSimilarity = (set1: Set<string>, set2: Set<string>): number => {
+    if (set1.size === 0 || set2.size === 0) return 0;
+    const intersection = new Set([...set1].filter(g => set2.has(g)));
+    const smaller = Math.min(set1.size, set2.size);
+    return intersection.size / smaller; // Dice-like coefficient
+};
+
+// Extract significant words from title for similarity matching
+const extractSignificantWords = (title: string | null | undefined): Set<string> => {
+    if (!title) return new Set();
+    const words = title
+        .toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length >= 3 && !STOP_WORDS.has(w));
+    return new Set(words);
+};
+
+// Calculate Jaccard similarity between two word sets
+const calculateWordSimilarity = (set1: Set<string>, set2: Set<string>): number => {
+    if (set1.size === 0 || set2.size === 0) return 0;
+    const intersection = new Set([...set1].filter(w => set2.has(w)));
+    const union = new Set([...set1, ...set2]);
+    return intersection.size / union.size;
+};
+
+// Secret logging for duplicate detection (only in dev)
+const logDuplicateDetection = (original: string, duplicate: string, reason: string) => {
+    if (process.env.NODE_ENV === 'development') {
+        console.log(`[DuplicateDetected] "${duplicate}" is duplicate of "${original}" (${reason})`);
+    }
+};
+
+/**
+ * Fisher-Yates shuffle algorithm - creates a new shuffled array
+ * Uses a seeded random for consistency within a session but different across searches
+ */
+const shuffleArray = <T>(array: T[], seed?: number): T[] => {
+    const result = [...array];
+    // Use provided seed or generate one based on current time
+    let currentSeed = seed ?? Date.now();
+    
+    // Simple seeded random number generator (mulberry32)
+    const seededRandom = () => {
+        currentSeed = (currentSeed + 0x6D2B79F5) | 0;
+        let t = currentSeed;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    
+    // Fisher-Yates shuffle
+    for (let i = result.length - 1; i > 0; i--) {
+        const j = Math.floor(seededRandom() * (i + 1));
+        [result[i], result[j]] = [result[j], result[i]];
+    }
+    
+    return result;
+};
+
+/**
+ * Options for getUniqueMangas
+ */
+export type GetUniqueMangasOptions = {
+    /** If true, randomize the order of results. Default: false */
+    randomize?: boolean;
+    /** Seed for randomization. If not provided, uses current timestamp for different order each time */
+    randomSeed?: number;
+};
+
+export const getUniqueMangas = (
+    mangas: MangaCardProps['manga'][],
+    options: GetUniqueMangasOptions = {},
+): MangaCardProps['manga'][] => {
+    const { randomize = false, randomSeed } = options;
     const seenById = new Set<number>();
-    const seenByTitle = new Set<string>();
+    const seenByTitle = new Map<string, string>(); // normalized -> original title
+    const seenByFuzzyKey = new Map<string, string>(); // fuzzy key -> original title
+    const seenWordSets: Array<{ words: Set<string>; ngrams: Set<string>; title: string }> = []; // for similarity matching
     const unique: MangaCardProps['manga'][] = [];
+    let duplicateCount = 0;
 
     mangas.forEach((manga) => {
         // First check by ID (fastest, most reliable)
         if (seenById.has(manga.id)) {
+            duplicateCount++;
             return;
         }
 
-        // Then check by normalized title to catch duplicates from different sources
+        const originalTitle = manga.title || '';
         const normalizedTitle = normalizeTitle(manga.title);
+        const fuzzyKey = createFuzzyKey(manga.title);
+        const significantWords = extractSignificantWords(manga.title);
+        const ngrams = createNGrams(manga.title || '');
+
+        // Check by normalized title
         if (normalizedTitle && seenByTitle.has(normalizedTitle)) {
+            logDuplicateDetection(seenByTitle.get(normalizedTitle)!, originalTitle, 'normalized title match');
+            duplicateCount++;
             return;
         }
 
-        // Add to both sets and keep the manga
+        // Check by fuzzy key (catches more variations)
+        if (fuzzyKey && fuzzyKey.length >= 10 && seenByFuzzyKey.has(fuzzyKey)) {
+            logDuplicateDetection(seenByFuzzyKey.get(fuzzyKey)!, originalTitle, 'fuzzy title match');
+            duplicateCount++;
+            return;
+        }
+
+        // Check by n-gram similarity (catches typos, OCR errors, minor variations)
+        if (ngrams.size >= 5) {
+            const ngramMatch = seenWordSets.find(entry => {
+                const similarity = calculateNGramSimilarity(entry.ngrams, ngrams);
+                return similarity >= 0.6; // 60% n-gram overlap
+            });
+            if (ngramMatch) {
+                logDuplicateDetection(ngramMatch.title, originalTitle, 'n-gram similarity match');
+                duplicateCount++;
+                return;
+            }
+        }
+
+        // Check by word similarity (catches different translations of same manga)
+        if (significantWords.size >= 2) {
+            const similarEntry = seenWordSets.find(entry => {
+                // Require moderate similarity (50%+) for matching
+                const similarity = calculateWordSimilarity(entry.words, significantWords);
+                return similarity >= 0.5;
+            });
+            if (similarEntry) {
+                logDuplicateDetection(similarEntry.title, originalTitle, 'word similarity match');
+                duplicateCount++;
+                return;
+            }
+        }
+
+        // Add to all sets and keep the manga
         seenById.add(manga.id);
         if (normalizedTitle) {
-            seenByTitle.add(normalizedTitle);
+            seenByTitle.set(normalizedTitle, originalTitle);
+        }
+        if (fuzzyKey && fuzzyKey.length >= 10) {
+            seenByFuzzyKey.set(fuzzyKey, originalTitle);
+        }
+        if (significantWords.size >= 2 || ngrams.size >= 5) {
+            seenWordSets.push({ words: significantWords, ngrams, title: originalTitle });
         }
         unique.push(manga);
     });
+
+    // Log summary
+    if (duplicateCount > 0 && process.env.NODE_ENV === 'development') {
+        console.log(`[DuplicateFilter] Removed ${duplicateCount} duplicates, showing ${unique.length} unique mangas`);
+    }
+
+    // Randomize if requested (when no sort order is active)
+    if (randomize && unique.length > 1) {
+        const shuffled = shuffleArray(unique, randomSeed);
+        if (process.env.NODE_ENV === 'development') {
+            console.log(`[RandomOrder] Shuffled ${shuffled.length} mangas with seed: ${randomSeed ?? 'auto'}`);
+        }
+        return shuffled;
+    }
 
     return unique;
 };
@@ -285,16 +466,21 @@ export const applySelectionChange = (
     setter: Dispatch<SetStateAction<ModeOneFilterSelection>>,
 ) =>
     (filterKey: string, value: ModeOneFilterSelection[string] | null) => {
+        console.log('[applySelectionChange] Called with:', { filterKey, value });
         setter((previous) => {
+            console.log('[applySelectionChange] Previous state:', previous);
             if (!value || (value.type === 'checkbox' && !value.value)) {
                 const { [filterKey]: _, ...rest } = previous;
+                console.log('[applySelectionChange] Removing filter key, new state:', rest);
                 return rest;
             }
 
-            return {
+            const newState = {
                 ...previous,
                 [filterKey]: value,
             };
+            console.log('[applySelectionChange] New state:', newState);
+            return newState;
         });
     };
 

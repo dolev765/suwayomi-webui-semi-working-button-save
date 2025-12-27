@@ -1694,6 +1694,7 @@
       "title": "Filter Your Search",
       "queryLabel": "What are you looking for?",
       "strictOnly": "Show only exact matches across all sources",
+      "hideColorless": "Hide colorless/grayscale hentais",
       "open": "Search Filters",
       "checkboxLabel": "{{label}}",
       "tri": {

@@ -17,6 +17,10 @@ export type UseModeOneFeedsParams = {
     hideLibraryEntries: boolean;
     searchQuery: string;
     activeKeys: ModeOneSourceKey[];
+    /** If true, randomize the order of results (used when no sort order is active) */
+    shouldRandomize?: boolean;
+    /** Seed for randomization - changes each search to get different order */
+    randomSeed?: number;
 };
 
 export type UseModeOneFeedsResult = {
@@ -34,6 +38,8 @@ export const useModeOneFeeds = ({
     hideLibraryEntries,
     searchQuery,
     activeKeys,
+    shouldRandomize = false,
+    randomSeed,
 }: UseModeOneFeedsParams): UseModeOneFeedsResult => {
     const hentai2readFeed = useSourceFeed(
         resolvedSources.hentai2read?.id,
@@ -126,8 +132,11 @@ export const useModeOneFeeds = ({
             }
         }
 
-        return { items: getUniqueMangas(items), warnings: warningsByManga };
-    }, [activeKeys, batchCount, feedByKey]);
+        return { 
+            items: getUniqueMangas(items, { randomize: shouldRandomize, randomSeed }), 
+            warnings: warningsByManga 
+        };
+    }, [activeKeys, batchCount, feedByKey, shouldRandomize, randomSeed]);
 
     const hasNextPage = useMemo(() => {
         if (!activeKeys.length) {

@@ -4,7 +4,7 @@ import { useLocalStorage, useSessionStorage } from '@/base/hooks/useStorage.tsx'
 import { BaseMangaGrid } from '@/features/manga/components/BaseMangaGrid.tsx';
 import { MangaCardProps } from '@/features/manga/Manga.types.ts';
 import { ModeOneFilterPanel } from '@/features/mode-one/components/ModeOneFilterPanel.tsx';
-import { ModeOneFilterSelection, ModeOneSourceKey } from '@/features/mode-one/ModeOne.types.ts';
+import { ModeOneFilterPayload, ModeOneFilterSelection, ModeOneSourceKey } from '@/features/mode-one/ModeOne.types.ts';
 import { ensureDatabaseReady } from '@/features/mode-one/services/tagDatabaseSQL.ts';
 import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle.ts';
 import { useMetadataServerSettings } from '@/features/settings/services/ServerSettingsMetadata.ts';
@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigationType } from 'react-router-dom';
 
+import { analyzeColorBatch, hasFullColorTag, reorderByColor } from './mode-one/colorDetection.ts';
 import { BATCH_SIZE_PER_SOURCE, HENTAI2READ_SYNTHETIC_TAGS, SOURCE_CONFIG } from './mode-one/constants.ts';
 import { ModeOneFeedState, useEnsureFeedCapacity, useSourceFeed } from './mode-one/feedHooks.ts';
 import {
@@ -46,7 +47,7 @@ export const ModeOne = () => {
     const { t } = useTranslation();
     useAppTitle(t('global.label.one_mode'));
 
-    const { key: locationKey, pathname, state } = useLocation();
+    const { key: locationKey } = useLocation();
     const navigationType = useNavigationType();
     const sessionStoragePrefix = `mode-one-location-${locationKey}`;
     const scrollPositionKey = `${sessionStoragePrefix}-scroll-position`;
@@ -237,6 +238,7 @@ export const ModeOne = () => {
         '',
     );
     const [strictOnly, setStrictOnly] = useLocalStorage('mode-one-strict-only', false);
+    const [hideColorless, setHideColorless] = useLocalStorage('mode-one-hide-colorless', false);
     const [liveUpdatesEnabled, setLiveUpdatesEnabled] = useLocalStorage('mode-one-live-filter-updates', true);
     const [panelSelectionDraft, setPanelSelectionDraft] = useSessionStorage<ModeOneFilterSelection>(
         `${sessionStoragePrefix}-panel-filters`,
@@ -250,10 +252,14 @@ export const ModeOne = () => {
         `${sessionStoragePrefix}-panel-strict-only`,
         false,
     );
-    const [tagDisplayValues, setTagDisplayValues] = useState<Record<string, string>>({});
+    const [panelHideColorlessDraft, setPanelHideColorlessDraft] = useSessionStorage<boolean>(
+        `${sessionStoragePrefix}-panel-hide-colorless`,
+        false,
+    );
     const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
 
     const strictOnlyValue = strictOnly ?? false;
+    const hideColorlessValue = hideColorless ?? false;
     const liveUpdatesActive = liveUpdatesEnabled ?? true;
     const allowedSourceKeys = resolvedKeys;
 
@@ -262,9 +268,10 @@ export const ModeOne = () => {
     const searchQueryRef = useRef(searchQuery);
     const strictOnlyValueRef = useRef(strictOnlyValue);
     const panelSelectionDraftRef = useRef(panelSelectionDraft);
-    const tagDisplayValuesRef = useRef(tagDisplayValues);
     const panelQueryDraftRef = useRef(panelQueryDraft);
     const panelStrictOnlyDraftRef = useRef(panelStrictOnlyDraft);
+    const hideColorlessValueRef = useRef(hideColorlessValue);
+    const panelHideColorlessDraftRef = useRef(panelHideColorlessDraft);
 
     // Update refs when values change
     useEffect(() => {
@@ -277,18 +284,20 @@ export const ModeOne = () => {
         strictOnlyValueRef.current = strictOnlyValue;
     }, [strictOnlyValue]);
     useEffect(() => {
+        hideColorlessValueRef.current = hideColorlessValue;
+    }, [hideColorlessValue]);
+    useEffect(() => {
         panelSelectionDraftRef.current = panelSelectionDraft;
     }, [panelSelectionDraft]);
-
-    useEffect(() => {
-        tagDisplayValuesRef.current = tagDisplayValues;
-    }, [tagDisplayValues]);
     useEffect(() => {
         panelQueryDraftRef.current = panelQueryDraft;
     }, [panelQueryDraft]);
     useEffect(() => {
         panelStrictOnlyDraftRef.current = panelStrictOnlyDraft;
     }, [panelStrictOnlyDraft]);
+    useEffect(() => {
+        panelHideColorlessDraftRef.current = panelHideColorlessDraft;
+    }, [panelHideColorlessDraft]);
 
     // Function to save state cache snapshot
     // This function reads directly from the current state values to ensure we get the latest
@@ -297,19 +306,21 @@ export const ModeOne = () => {
         currentFilterSelection = filterSelectionRef.current,
         currentSearchQuery = searchQueryRef.current,
         currentStrictOnly = strictOnlyValueRef.current,
+        currentHideColorless = hideColorlessValueRef.current,
         currentPanelSelectionDraft = panelSelectionDraftRef.current,
         currentPanelQueryDraft = panelQueryDraftRef.current,
         currentPanelStrictOnlyDraft = panelStrictOnlyDraftRef.current,
-        currentTagDisplayValues = tagDisplayValuesRef.current,
+        currentPanelHideColorlessDraft = panelHideColorlessDraftRef.current,
     ) => {
         const stateCache = {
             filterSelection: currentFilterSelection,
             searchQuery: currentSearchQuery,
             strictOnly: currentStrictOnly,
+            hideColorless: currentHideColorless,
             panelSelectionDraft: currentPanelSelectionDraft,
             panelQueryDraft: currentPanelQueryDraft,
             panelStrictOnlyDraft: currentPanelStrictOnlyDraft,
-            tagDisplayValues: currentTagDisplayValues,
+            panelHideColorlessDraft: currentPanelHideColorlessDraft,
             scrollPosition: window.scrollY || document.documentElement.scrollTop || 0,
             timestamp: Date.now(), // Add timestamp to verify it's being updated
         };
@@ -367,10 +378,11 @@ export const ModeOne = () => {
                         filterSelectionRef.current,
                         searchQueryRef.current,
                         strictOnlyValueRef.current,
+                        hideColorlessValueRef.current,
                         panelSelectionDraftRef.current,
                         panelQueryDraftRef.current,
                         panelStrictOnlyDraftRef.current,
-                        tagDisplayValuesRef.current,
+                        panelHideColorlessDraftRef.current,
                     );
                 }
             }
@@ -389,16 +401,31 @@ export const ModeOne = () => {
     useEffect(() => {
         // Only restore on initial mount when returning from manga reader (POP navigation)
         if (navigationType === 'POP' && !stateRestoredRef.current) {
-            const cachedState = AppStorage.session.getItemParsed<{
+            type StateCache = {
                 filterSelection?: ModeOneFilterSelection;
                 searchQuery?: string;
                 strictOnly?: boolean;
+                hideColorless?: boolean;
                 panelSelectionDraft?: ModeOneFilterSelection;
                 panelQueryDraft?: string;
                 panelStrictOnlyDraft?: boolean;
+                panelHideColorlessDraft?: boolean;
                 scrollPosition?: number;
                 timestamp?: number;
-            }>(stateCacheKey, null);
+            };
+            const defaultStateCache: StateCache = {
+                filterSelection: {} as ModeOneFilterSelection,
+                searchQuery: '',
+                strictOnly: false,
+                hideColorless: false,
+                panelSelectionDraft: {} as ModeOneFilterSelection,
+                panelQueryDraft: '',
+                panelStrictOnlyDraft: false,
+                panelHideColorlessDraft: false,
+                scrollPosition: 0,
+                timestamp: 0,
+            };
+            const cachedState = AppStorage.session.getItemParsed<StateCache>(stateCacheKey, defaultStateCache);
 
             console.log('[ModeOne] Attempting to restore cache:', {
                 key: stateCacheKey,
@@ -421,6 +448,9 @@ export const ModeOne = () => {
                 if (cachedState.strictOnly !== undefined) {
                     setStrictOnly(cachedState.strictOnly);
                 }
+                if (cachedState.hideColorless !== undefined) {
+                    setHideColorless(cachedState.hideColorless);
+                }
                 if (cachedState.panelSelectionDraft) {
                     setPanelSelectionDraft(cachedState.panelSelectionDraft);
                 }
@@ -429,6 +459,9 @@ export const ModeOne = () => {
                 }
                 if (cachedState.panelStrictOnlyDraft !== undefined) {
                     setPanelStrictOnlyDraft(cachedState.panelStrictOnlyDraft);
+                }
+                if (cachedState.panelHideColorlessDraft !== undefined) {
+                    setPanelHideColorlessDraft(cachedState.panelHideColorlessDraft);
                 }
 
                 // Restore scroll position - wait for content to load
@@ -476,6 +509,45 @@ export const ModeOne = () => {
         tagSearchModeValue === 'and' ? 'and' :
             tagSearchModeValue === 'or' ? 'or' :
                 'hybrid'; // default to hybrid
+
+    // Check if a sort order is active (not default/empty)
+    const sortOrderValue = filterSelection['select:sort']?.type === 'select'
+        ? filterSelection['select:sort'].value
+        : null;
+    const isSortOrderActive = sortOrderValue !== null && sortOrderValue !== '';
+
+    // Generate a random seed based on 10-hour time windows
+    // This ensures all users see the same order during each 10-hour period
+    // The seed changes globally every 10 hours
+    const randomSeed = useMemo(() => {
+        // Create a signature from the current search state
+        const selectionKeys = Object.keys(filterSelection).sort();
+        const selectionValues = selectionKeys.map(k => {
+            const val = filterSelection[k];
+            return val ? `${k}:${val.value}` : '';
+        }).join('|');
+        const searchSignature = `${searchQuery}|${selectionValues}|${strictOnlyValue}`;
+
+        // Calculate 10-hour window: milliseconds in 10 hours = 10 * 60 * 60 * 1000 = 36,000,000
+        const TEN_HOURS_MS = 10 * 60 * 60 * 1000;
+        const timeWindow = Math.floor(Date.now() / TEN_HOURS_MS);
+
+        // Create a hash from the search signature + time window
+        // This ensures: same search + same 10-hour period = same order for all users
+        let hash = timeWindow;
+        for (let i = 0; i < searchSignature.length; i++) {
+            const char = searchSignature.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32-bit integer
+        }
+
+        if (process.env.NODE_ENV === 'development') {
+            const nextChange = new Date((timeWindow + 1) * TEN_HOURS_MS);
+            console.log(`[RandomOrder] Time window: ${timeWindow}, seed: ${hash}, next change: ${nextChange.toLocaleString()}`);
+        }
+
+        return Math.abs(hash);
+    }, [filterSelection, searchQuery, strictOnlyValue]);
 
     const filterPayloads = useMemo(
         () => buildFilterPayloads(aggregatedFilters, filterSelection, strictOnlyValue, allowedSourceKeys, t, tagSearchMode),
@@ -774,8 +846,130 @@ export const ModeOne = () => {
             }
         }
 
-        return { items: getUniqueMangas(items), warnings: warningsByManga };
-    }, [activeKeys, batchCount, feedByKey]);
+        // Randomize order when no sort is active - gives different results each search
+        const shouldRandomize = !isSortOrderActive;
+        return {
+            items: getUniqueMangas(items, { randomize: shouldRandomize, randomSeed }),
+            warnings: warningsByManga
+        };
+    }, [activeKeys, batchCount, feedByKey, isSortOrderActive, randomSeed]);
+
+    // Color-based reordering: prioritize colorful manga in top 20
+    const [colorResults, setColorResults] = useState<Map<number, boolean>>(new Map());
+    const [colorOrderedMangas, setColorOrderedMangas] = useState<MangaCardProps['manga'][]>([]);
+    const [isAnalyzingColors, setIsAnalyzingColors] = useState(false);
+    const lastAnalyzedIdsRef = useRef<string>('');
+
+    // Analyze colors and reorder when displayedMangas changes
+    // Use a stable reference to avoid infinite loops - create a signature from manga IDs
+    const displayedMangasSignature = useMemo(() => {
+        if (displayedMangas.length === 0) return '';
+        return displayedMangas.slice(0, 50).map(m => m.id).join(',');
+    }, [displayedMangas]);
+
+    // Store latest displayedMangas in a ref to avoid stale closures
+    const displayedMangasRef = useRef(displayedMangas);
+    useEffect(() => {
+        displayedMangasRef.current = displayedMangas;
+    }, [displayedMangas]);
+
+    useEffect(() => {
+        const currentMangas = displayedMangasRef.current;
+        if (currentMangas.length === 0) {
+            if (colorOrderedMangas.length > 0) {
+                setColorOrderedMangas([]);
+            }
+            return;
+        }
+
+        // Create a signature to avoid re-analyzing the same set
+        const idsSignature = displayedMangasSignature;
+        if (idsSignature === lastAnalyzedIdsRef.current) {
+            return;
+        }
+
+        // Debug: Log first few manga titles
+        console.log(`[ModeOne] Processing ${currentMangas.length} mangas. First 5 titles:`);
+        currentMangas.slice(0, 5).forEach((m, i) => {
+            console.log(`  ${i + 1}. ${m.title}`);
+        });
+
+        // First pass: instant reorder based on "full color" tag (no async needed)
+        const tagColorResults = new Map<number, boolean>();
+        currentMangas.forEach(manga => {
+            if (hasFullColorTag(manga as any)) {
+                tagColorResults.set(manga.id, true);
+            }
+        });
+
+        // Apply initial tag-based reorder immediately (includes deprioritization)
+        console.log('[ModeOne] Calling reorderByColor...');
+        const initialReordered = reorderByColor(currentMangas, tagColorResults, 20, randomSeed);
+        console.log(`[ModeOne] After reorder, first 5 titles:`);
+        initialReordered.slice(0, 5).forEach((m, i) => {
+            console.log(`  ${i + 1}. ${m.title}`);
+        });
+
+        // Update state - React will handle deduplication
+        setColorOrderedMangas(initialReordered);
+        setColorResults(tagColorResults);
+        lastAnalyzedIdsRef.current = idsSignature;
+
+        // Second pass: async analyze thumbnails for those without full color tag
+        const mangasToAnalyze = currentMangas.filter(m => !tagColorResults.has(m.id));
+
+        if (mangasToAnalyze.length > 0 && !isSortOrderActive) {
+            setIsAnalyzingColors(true);
+
+            // Analyze in background
+            analyzeColorBatch(mangasToAnalyze, 5).then((thumbnailResults) => {
+                // Merge with tag results
+                const mergedResults = new Map(tagColorResults);
+                thumbnailResults.forEach((isColorful, id) => {
+                    if (!mergedResults.has(id)) {
+                        mergedResults.set(id, isColorful);
+                    }
+                });
+
+                setColorResults(mergedResults);
+
+                // Reorder with full color analysis
+                const reordered = reorderByColor(displayedMangasRef.current, mergedResults, 20, randomSeed);
+                setColorOrderedMangas(reordered);
+                setIsAnalyzingColors(false);
+
+                if (process.env.NODE_ENV === 'development') {
+                    const colorfulCount = Array.from(mergedResults.values()).filter(v => v).length;
+                    const grayscaleCount = mergedResults.size - colorfulCount;
+                    console.log(`[ColorAnalysis] Analyzed ${mergedResults.size} mangas: ${colorfulCount} colorful, ${grayscaleCount} grayscale`);
+                }
+            }).catch(() => {
+                setIsAnalyzingColors(false);
+            });
+        }
+    }, [displayedMangasSignature, isSortOrderActive, randomSeed]);
+
+    // Use color-ordered mangas if available, otherwise original
+    const colorOrderedMangasFinal = colorOrderedMangas.length > 0 ? colorOrderedMangas : displayedMangas;
+
+    // Filter out colorless mangas if hideColorless is enabled
+    const finalDisplayedMangas = useMemo(() => {
+        if (!hideColorlessValue) {
+            return colorOrderedMangasFinal;
+        }
+
+        // Filter out mangas that are detected as colorless
+        return colorOrderedMangasFinal.filter(manga => {
+            // If manga has full color tag, always show it
+            if (hasFullColorTag(manga as any)) {
+                return true;
+            }
+            // Otherwise, check if it's detected as colorful in colorResults
+            // If not in colorResults yet (still analyzing), show it (don't filter until we know)
+            const isColorful = colorResults.get(manga.id);
+            return isColorful !== false; // Show if colorful or unknown
+        });
+    }, [colorOrderedMangasFinal, hideColorlessValue, colorResults]);
 
     const hasNextPage = useMemo(() => {
         if (!activeKeys.length) {
@@ -829,6 +1023,7 @@ export const ModeOne = () => {
             setPanelSelectionDraft(filterSelection);
             setPanelQueryDraft(searchQuery);
             setPanelStrictOnlyDraft(strictOnlyValue);
+            setPanelHideColorlessDraft(hideColorlessValue);
         }
         setIsFilterPanelOpen(true);
     }, [
@@ -838,7 +1033,9 @@ export const ModeOne = () => {
         setPanelQueryDraft,
         setPanelSelectionDraft,
         setPanelStrictOnlyDraft,
+        setPanelHideColorlessDraft,
         strictOnlyValue,
+        hideColorlessValue,
     ]);
 
     const handleLiveUpdatesEnabledChange = useCallback(
@@ -848,10 +1045,12 @@ export const ModeOne = () => {
                 setFilterSelection(panelSelectionDraft);
                 setSearchQuery(panelQueryDraft);
                 setStrictOnly(panelStrictOnlyDraft);
+                setHideColorless(panelHideColorlessDraft);
             } else {
                 setPanelSelectionDraft(filterSelection);
                 setPanelQueryDraft(searchQuery);
                 setPanelStrictOnlyDraft(strictOnlyValue);
+                setPanelHideColorlessDraft(hideColorlessValue);
             }
         },
         [
@@ -859,15 +1058,19 @@ export const ModeOne = () => {
             panelQueryDraft,
             panelSelectionDraft,
             panelStrictOnlyDraft,
+            panelHideColorlessDraft,
             searchQuery,
             setFilterSelection,
             setLiveUpdatesEnabled,
             setPanelQueryDraft,
             setPanelSelectionDraft,
             setPanelStrictOnlyDraft,
+            setPanelHideColorlessDraft,
             setSearchQuery,
             setStrictOnly,
+            setHideColorless,
             strictOnlyValue,
+            hideColorlessValue,
         ],
     );
 
@@ -878,14 +1081,17 @@ export const ModeOne = () => {
         setFilterSelection(panelSelectionDraft);
         setSearchQuery(panelQueryDraft);
         setStrictOnly(panelStrictOnlyDraft);
+        setHideColorless(panelHideColorlessDraft);
     }, [
         liveUpdatesActive,
         panelQueryDraft,
         panelSelectionDraft,
         panelStrictOnlyDraft,
+        panelHideColorlessDraft,
         setFilterSelection,
         setSearchQuery,
         setStrictOnly,
+        setHideColorless,
     ]);
 
     const handleResetFilters = useCallback(() => {
@@ -893,19 +1099,23 @@ export const ModeOne = () => {
             setFilterSelection({});
             setSearchQuery('');
             setStrictOnly(false);
+            setHideColorless(false);
             return;
         }
         setPanelSelectionDraft({});
         setPanelQueryDraft('');
         setPanelStrictOnlyDraft(false);
+        setPanelHideColorlessDraft(false);
     }, [
         liveUpdatesActive,
         setFilterSelection,
         setPanelQueryDraft,
         setPanelSelectionDraft,
         setPanelStrictOnlyDraft,
+        setPanelHideColorlessDraft,
         setSearchQuery,
         setStrictOnly,
+        setHideColorless,
     ]);
 
     const hasPendingChanges = useMemo(() => {
@@ -925,6 +1135,10 @@ export const ModeOne = () => {
             return true;
         }
 
+        if (panelHideColorlessDraft !== hideColorlessValue) {
+            return true;
+        }
+
         return false;
     }, [
         filterSelection,
@@ -932,13 +1146,16 @@ export const ModeOne = () => {
         panelQueryDraft,
         panelSelectionDraft,
         panelStrictOnlyDraft,
+        panelHideColorlessDraft,
         searchQuery,
         strictOnlyValue,
+        hideColorlessValue,
     ]);
 
     const selectionForPanel = liveUpdatesActive ? filterSelection : panelSelectionDraft;
     const queryForPanel = liveUpdatesActive ? searchQuery : panelQueryDraft;
     const strictOnlyForPanel = liveUpdatesActive ? strictOnlyValue : panelStrictOnlyDraft;
+    const hideColorlessForPanel = liveUpdatesActive ? hideColorlessValue : panelHideColorlessDraft;
     const selectionChangeHandlerForPanel = liveUpdatesActive
         ? handleSelectionChange
         : handleDraftSelectionChange;
@@ -961,6 +1178,16 @@ export const ModeOne = () => {
             }
         },
         [liveUpdatesActive, setPanelStrictOnlyDraft, setStrictOnly],
+    );
+    const hideColorlessChangeHandlerForPanel = useCallback(
+        (value: boolean) => {
+            if (liveUpdatesActive) {
+                setHideColorless(value);
+            } else {
+                setPanelHideColorlessDraft(value);
+            }
+        },
+        [liveUpdatesActive, setPanelHideColorlessDraft, setHideColorless],
     );
 
     if (sourceListError) {
@@ -1015,7 +1242,7 @@ export const ModeOne = () => {
                 </Button>
             </Stack>
             <BaseMangaGrid
-                mangas={displayedMangas}
+                mangas={finalDisplayedMangas}
                 isLoading={
                     isSourceListLoading ||
                     activeKeys.some((key) => feedByKey[key].isLoading && !feedByKey[key].mangas.length)
@@ -1030,16 +1257,18 @@ export const ModeOne = () => {
                 mangaWarnings={mangaWarnings}
             />
             <ModeOneFilterPanel
-                onTagDisplayValuesChange={setTagDisplayValues}
                 open={isFilterPanelOpen}
                 onClose={() => setIsFilterPanelOpen(false)}
                 aggregatedFilters={aggregatedFilters}
+                availableSourceKeys={allowedSourceKeys}
                 selection={selectionForPanel}
                 onSelectionChange={selectionChangeHandlerForPanel}
                 query={queryForPanel}
                 onQueryChange={queryChangeHandlerForPanel}
                 strictOnly={strictOnlyForPanel}
                 onStrictOnlyChange={strictOnlyChangeHandlerForPanel}
+                hideColorless={hideColorlessForPanel}
+                onHideColorlessChange={hideColorlessChangeHandlerForPanel}
                 onReset={handleResetFilters}
                 liveUpdatesEnabled={liveUpdatesActive}
                 onLiveUpdatesEnabledChange={handleLiveUpdatesEnabledChange}
