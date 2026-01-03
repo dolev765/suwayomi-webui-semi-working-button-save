@@ -9,5 +9,7 @@ build/*
 src/lib/graphql/schema.json
 
 # Large files that exceed GitHub limits
-*.jar
+# *.jar
+Suwayomi-Server/build/
+Suwayomi-Server/.gradle/
 .history/

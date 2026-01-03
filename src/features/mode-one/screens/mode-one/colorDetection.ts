@@ -129,18 +129,18 @@ async function analyzeImageColor(imageUrl: string): Promise<boolean> {
                     const a = data[i + 3];
 
                     // Skip transparent pixels
-                    if (a < 128) continue;
+                    if (a >= 128) {
+                        totalSamples += 1;
 
-                    totalSamples++;
+                        // Fast color detection
+                        if (isColorfulPixel(r, g, b)) {
+                            colorfulCount += 1;
 
-                    // Fast color detection
-                    if (isColorfulPixel(r, g, b)) {
-                        colorfulCount++;
-
-                        // Early exit: if we've found enough colorful pixels, it's definitely colorful
-                        if (colorfulCount >= earlyExitThreshold) {
-                            finish(true);
-                            return;
+                            // Early exit: if we've found enough colorful pixels, it's definitely colorful
+                            if (colorfulCount >= earlyExitThreshold) {
+                                finish(true);
+                                return;
+                            }
                         }
                     }
                 }
@@ -159,6 +159,7 @@ async function analyzeImageColor(imageUrl: string): Promise<boolean> {
 
                 finish(isColorful);
             } catch (error) {
+                // eslint-disable-next-line no-console
                 console.warn('[ColorDetection] Error analyzing image:', error);
                 finish(false);
             }
@@ -203,6 +204,7 @@ export async function analyzeColorBatch(
                 const isColorful = await analyzeImageColor(thumbnailUrl);
                 results.set(manga.id, isColorful);
             } catch (error) {
+                // eslint-disable-next-line no-console
                 console.warn(`[ColorDetection] Failed to analyze manga ${manga.id}:`, error);
                 results.set(manga.id, false);
             }
@@ -218,25 +220,25 @@ export async function analyzeColorBatch(
     };
 
     // Process all mangas
-    for (let i = 0; i < Math.min(mangas.length, batchSize); i++) {
+    for (let i = 0; i < Math.min(mangas.length, batchSize); i += 1) {
         const manga = mangas[i];
-        if (!manga) continue;
+        if (manga) {
+            // Get thumbnail URL using Mangas helper
+            const thumbnailUrl = Mangas.getThumbnailUrl(manga as any);
+            if (thumbnailUrl) {
+                // If we've reached the concurrency limit, wait for one to complete
+                if (activePromises.size >= CONCURRENT_LIMIT) {
+                    // eslint-disable-next-line no-await-in-loop
+                    await Promise.race(Array.from(activePromises));
+                }
 
-        // Get thumbnail URL using Mangas helper
-        const thumbnailUrl = Mangas.getThumbnailUrl(manga as any);
-        if (!thumbnailUrl) {
-            // If no thumbnail, assume grayscale (conservative approach)
-            results.set(manga.id, false);
-            continue;
+                // Start the analysis (don't await - let it run concurrently)
+                addAnalysis(manga, thumbnailUrl);
+            } else {
+                // If no thumbnail, assume grayscale (conservative approach)
+                results.set(manga.id, false);
+            }
         }
-
-        // If we've reached the concurrency limit, wait for one to complete
-        if (activePromises.size >= CONCURRENT_LIMIT) {
-            await Promise.race(Array.from(activePromises));
-        }
-
-        // Start the analysis (don't await - let it run concurrently)
-        addAnalysis(manga, thumbnailUrl);
     }
 
     // Wait for all remaining analyses to complete
